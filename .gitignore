@@ -56,3 +56,6 @@ credentials.json # Ou qualquer arquivo JSON com credenciais
 # Dados do SpeechRecognition ou outros caches temporários
 # Se o SpeechRecognition gerar arquivos temporários, adicione-os aqui.
 # No geral, a lib não persiste muitos dados, mas é bom ter em mente.
+
+# Kullanıcıya özel uygulama ayarları (ör. Dashboard > Ayarlar'dan seçilen TTS sesi)
+settings.json

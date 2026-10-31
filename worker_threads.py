@@ -1,40 +1,160 @@
+# faster-whisper (ctranslate2/onnxruntime) PyQt5'ten ÖNCE import edilip
+# model burada oluşturulmalı: PyQt5 önce yüklenirse native DLL çakışması
+# yüzünden Windows'ta uygulama çöküyor (access violation). Bu yüzden bu
+# dosyadaki PyQt5 importu kasıtlı olarak faster-whisper'dan SONRA geliyor.
+from faster_whisper import WhisperModel
+
+# Sesi metne çevirme tamamen yerelde çalışır (internet/Google'a veri gitmez).
+# Model ilk kullanımda bir kez indirilir (Hugging Face), sonrasında yerel
+# önbellekten yüklenir. "small" modeli hız/Türkçe doğruluk dengesi için seçildi.
+print("🧠 Yerel konuşma tanıma modeli (faster-whisper/small) yükleniyor...")
+_whisper_model = WhisperModel("small", device="cpu", compute_type="int8")
+print("✅ Yerel konuşma tanıma modeli hazır.")
+
 from PyQt5.QtCore import QThread, pyqtSignal
 import speech_recognition as sr
+import threading
 import time
+import os
+import tempfile
+import pythoncom
+
+from tts_engine import (
+    speak_text, speak_text_interruptible, list_turkish_voices,
+    get_selected_voice_id, set_selected_voice_id, get_setting, set_setting,
+)
+
+
+class LocalSpeechUnderstoodError(Exception):
+    """Ses yakalandı ama yerel modelden anlamlı bir metin çıkmadı."""
+
+
+def transcribe_audio(audio: sr.AudioData, language: str = "tr") -> str:
+    """Mikrofonla yakalanan sesi, Google'a göndermeden, yerel faster-whisper
+    modeliyle metne çevirir. Ses verisi geçici bir .wav dosyasına yazılır,
+    işlem bitince dosya silinir."""
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
+            tmp_file.write(audio.get_wav_data())
+            tmp_path = tmp_file.name
+
+        # vad_filter: sessizlik/gürültü klipleri Whisper'a hiç gitmeden elenir.
+        # Bu olmadan Whisper, ses içermeyen kliplerde bile YouTube altyazısı
+        # tarzı rastgele cümleler ("abone olmayı unutmayın" vb.) halüsinasyon
+        # olarak üretebiliyor.
+        segments, _info = _whisper_model.transcribe(
+            tmp_path,
+            language=language,
+            vad_filter=True,
+            vad_parameters=dict(min_silence_duration_ms=500),
+        )
+        text = "".join(segment.text for segment in segments).strip()
+
+        if not text:
+            raise LocalSpeechUnderstoodError("Ses anlaşılamadı.")
+        return text
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 
 class HotwordListener(QThread):
     hotwordDetected = pyqtSignal(str)
     statusUpdate = pyqtSignal(str)
 
-    def __init__(self, hotword="computador"):
+    def __init__(self, hotword="bilgisayar"):
         super().__init__()
-        self.hotword = hotword
+        self.hotword = hotword.lower()
         self.recognizer = sr.Recognizer()
+        try:
+            default_mic_name = sr.Microphone.list_microphone_names()[sr.Microphone().device_index or 0]
+        except Exception:
+            default_mic_name = "bilinmiyor"
+        print(f"🎙️ Kullanılan mikrofon: {default_mic_name}")
+        print(f"🎙️ Tüm mikrofonlar: {sr.Microphone.list_microphone_names()}")
         self.mic = sr.Microphone()
         self._running = True
+        self.paused = False
+        # Dashboard'daki "Dinlemeyi Duraklat" düğmesiyle verilen KALICI
+        # tercih. pause()/resume() Brifing ve ses testi gibi akışlar
+        # tarafından da geçici olarak çağrılıyor; manually_muted True
+        # olduğunda resume()'un bu geçici çağrıları kullanıcının kararını
+        # ezmesini engelliyoruz (bkz. resume() ve set_muted()).
+        self.manually_muted = False
+        # Mikrofon o an KAPALIYKEN set, açıkken clear durumda. Bluetooth
+        # kulaklığın mikrofonu dinlerken cihaz "Hands-Free" (HFP) moduna
+        # geçip ses çıkışını bozabiliyor; pause_and_wait() bu event ile
+        # gerçekten mikrofonun bırakıldığından emin oluyor (bkz. o metod).
+        self._mic_idle_event = threading.Event()
+        self._mic_idle_event.set()
+
+    def pause(self):
+        self.paused = True
+
+    def set_muted(self, muted):
+        """Dashboard'daki "Dinlemeyi Duraklat/Başlat" düğmesi bunu çağırır.
+        pause()/resume()'dan farklı olarak kalıcıdır: Brifing okunurken
+        veya Ayarlar'da ses testi yapılırken tetiklenen otomatik resume()
+        çağrıları, kullanıcı burada susturmayı seçtiyse mikrofonu tekrar
+        açmaz (bkz. resume())."""
+        self.manually_muted = muted
+        if muted:
+            self.paused = True
+
+    def resume(self):
+        if not self.manually_muted:
+            self.paused = False
+
+    def pause_and_wait(self, timeout=10):
+        """pause()'un senkron hâli: Bluetooth kulaklığın mikrofonu asıl
+        olarak bırakmasını (HFP modundan çıkmasını) bekler. pause() sadece
+        bir bayrak set ettiği için, o anda sürmekte olan
+        recognizer.listen() çağrısı (4-10 saniyeye kadar) hemen kesilmiyor;
+        bu yüzden hemen ardından başlayan TTS, mikrofon hâlâ açıkken aynı
+        Bluetooth cihazda sese başlamaya çalışıp sessizce başarısız
+        olabiliyor. Günlük Brifing ve Ayarlar'daki ses testi bu metodu
+        kullanır (bkz. main.py)."""
+        self.paused = True
+        self._mic_idle_event.wait(timeout)
 
     def run(self):
-        self.statusUpdate.emit(f"Diga '{self.hotword}' para ativar.")
+        self.statusUpdate.emit(f"Etkinleştirmek için '{self.hotword}' deyin.")
         while self._running:
-            with self.mic as source:
-                self.recognizer.adjust_for_ambient_noise(source)
-                self.statusUpdate.emit("Fale: 'Computador'...")
+            if self.paused:
+                self._mic_idle_event.set()
+                time.sleep(0.3)
+                continue
+            self._mic_idle_event.clear()
+            try:
                 try:
-                    audio = self.recognizer.listen(source, phrase_time_limit=10)
-                    frase = self.recognizer.recognize_google(audio, language="pt-BR").lower()
-                    print(f"🗣️ Ouvido: {frase}")
-                    if self.hotword in frase:
-                        self.hotwordDetected.emit(self.hotword)
-                        self.statusUpdate.emit("chamada detectada! Processando...")
-                        time.sleep(1)
-                except sr.UnknownValueError:
-                    self.statusUpdate.emit(f"Não entendi a chamada. Diga '{self.hotword}' para ativar.")
+                    with self.mic as source:
+                        self.recognizer.adjust_for_ambient_noise(source, duration=0.3)
+                        if self.paused:
+                            continue
+                        print(f"👂 Dinleniyor... (enerji eşiği: {self.recognizer.energy_threshold:.0f})")
+                        audio = self.recognizer.listen(source, timeout=4, phrase_time_limit=6)
+                finally:
+                    self._mic_idle_event.set()
+                if self.paused:
                     continue
-                except Exception as e:
-                    self.statusUpdate.emit(f"Erro no reconhecimento da hotword: {e}")
-                    print(f"❌ Erro Hotword: {e}")
-                    time.sleep(2)
+                print("🧠 Sözleriniz yerel olarak işleniyor (faster-whisper)...")
+                frase = transcribe_audio(audio).lower()
+                print(f"🗣️ Hotword Kontrol: {frase}")
+                if self.hotword in frase:
+                    self.hotwordDetected.emit(self.hotword)
+                    self.statusUpdate.emit("Dinleniyor...")
+                    time.sleep(0.3)
+            except sr.WaitTimeoutError:
+                print("⏱️ Zaman aşımı: 4 saniyede ses algılanmadı.")
+                continue
+            except LocalSpeechUnderstoodError:
+                print("🤷 Ses yakalandı ama çözümlenemedi (anlaşılmadı).")
+                continue
+            except Exception as e:
+                print(f"❌ Mikrofon hatası: {e}")
+                self.statusUpdate.emit(f"Mikrofon hatası: {e}")
+                time.sleep(1)
 
     def stop(self):
         self._running = False
@@ -45,119 +165,104 @@ class AssistantWorker(QThread):
     commandRecognized = pyqtSignal(str)
     assistantResponse = pyqtSignal(str, str)
     assistantResult = pyqtSignal(str, str)
+    chatResponse = pyqtSignal(str, str)  # (user_text, assistant_text)
     errorOccurred = pyqtSignal(str)
     finished = pyqtSignal()
 
-    def __init__(self, llm, tts, gerar_comando_func, executar_comando_powershell_func, falar_func):
+    def __init__(self, llm, processar_entrada_func, executar_powershell_func):
         super().__init__()
         self.llm = llm
-        self.tts = tts
-        self.gerar_comando = gerar_comando_func
-        self.executar_comando_powershell = executar_comando_powershell_func
-        self.falar = falar_func
+        self.processar_entrada = processar_entrada_func
+        self.executar_comando_powershell = executar_powershell_func
         self.recognizer = sr.Recognizer()
         self.mic = sr.Microphone()
 
     def run(self):
-        # Loop principal do assistente, que só termina quando um comando é processado (executado/cancelado/saído)
-        command_processed = False
-        while not command_processed:
-            entrada_comando = ""  # Variável para armazenar o comando reconhecido
+        # COM motorunu bu iş parçacığında (QThread) başlat
+        pythoncom.CoInitialize()
 
-            # --- Loop para obter o Comando Principal (O que você deseja?) ---
-            comando_obtido_com_sucesso = False
-            while not comando_obtido_com_sucesso:
-                try:
-                    self.assistantResponse.emit("O que você deseja que eu faça?", "")
-                    self.falar("O que você deseja que eu faça?")
+        falar = speak_text
 
-                    with self.mic as source:
-                        self.recognizer.adjust_for_ambient_noise(source)
-                        # Tempo limite maior para o comando principal
-                        audio_comando = self.recognizer.listen(source, phrase_time_limit=10)
+        # Selamlama
+        self.chatResponse.emit("", "Sizi dinliyorum...")
+        falar("Sizi dinliyorum.")
+        time.sleep(0.3)
 
-                    entrada_comando = self.recognizer.recognize_google(audio_comando, language="pt-BR").lower()
-                    print(f"🗣️ Ouvido (Comando): {entrada_comando}")
+        consecutive_silence = 0
 
-                    if entrada_comando == "sair":
-                        self.assistantResult.emit("Comando cancelado.", "Você pediu para sair.")
-                        self.falar("Comando cancelado.")
-                        command_processed = True  # Marca para sair do loop externo
-                        comando_obtido_com_sucesso = True  # Marca para sair do loop atual
-                        break  # Sai do loop de obter comando
+        while True:
+            try:
+                with self.mic as source:
+                    self.recognizer.adjust_for_ambient_noise(source, duration=0.3)
+                    self.chatResponse.emit("", "Dinleniyor...")
+                    audio = self.recognizer.listen(source, timeout=7, phrase_time_limit=12)
 
-                    self.commandRecognized.emit(entrada_comando)  # Emite o comando reconhecido para a UI
-                    comando_obtido_com_sucesso = True  # Comando foi obtido com sucesso
+                self.chatResponse.emit("", "Sözleriniz yerel olarak işleniyor (faster-whisper)...")
+                user_text = transcribe_audio(audio).lower().strip()
+                print(f"🗣️ Kullanıcı: {user_text}")
+                consecutive_silence = 0
 
-                except sr.UnknownValueError:
-                    self.errorOccurred.emit("Não entendi o que você disse. Por favor, repita ou diga 'sair'.")
-                    self.falar("Não entendi o que você disse. Por favor, repita ou diga 'sair'.")
-                    # Não muda comando_obtido_com_sucesso, então o loop continua e repete a pergunta
-                except Exception as e:
-                    self.errorOccurred.emit(
-                        f"Erro no reconhecimento do comando: {e}. Por favor, tente novamente ou diga 'sair'.")
-                    self.falar(f"Ocorreu um erro ao ouvir o comando: {e}. Por favor, tente novamente ou diga 'sair'.")
-                    print(f"❌ Erro ao ouvir comando: {e}")
-                    # Não muda comando_obtido_com_sucesso, então o loop continua e repete a pergunta
-
-            # Se o comando foi "sair" (e command_processed se tornou True), sai do loop principal
-            if command_processed:
+            except sr.WaitTimeoutError:
+                consecutive_silence += 1
+                if consecutive_silence >= 1:
+                    print("Zaman aşımı: Beklemeye dönülüyor.")
+                    break
+                continue
+            except LocalSpeechUnderstoodError:
+                self.chatResponse.emit("", "Sizi tam anlayamadım, tekrar eder misiniz?")
+                falar("Tam anlayamadım.")
+                time.sleep(0.3)
+                continue
+            except Exception as e:
+                print(f"Ses tanıma hatası: {e}")
                 break
 
-            # --- Processar o Comando Obtido (Gerar PowerShell) ---
-            comando_powershell = self.gerar_comando(entrada_comando)
-            print(f"\n[+] Comando PowerShell gerado: {comando_powershell}")
-            self.assistantResponse.emit("Comando a ser executado:", comando_powershell)
+            # Çıkış ifadeleri
+            exit_phrases = ["çık", "çıkış", "kapat", "iptal", "vazgeç", "görüşürüz", "bay bay", "hoşça kal", "sus"]
+            if any(user_text == ep or user_text.startswith(ep + " ") for ep in exit_phrases):
+                self.chatResponse.emit(user_text, "Görüşmek üzere, iyi günler!")
+                falar("Görüşmek üzere.")
+                time.sleep(0.8)
+                break
 
-            # --- Loop para obter a Confirmação ---
-            confirmacao_obtida_com_sucesso = False
-            while not confirmacao_obtida_com_sucesso:
+            # Girdiyi Analiz Et (KOMUT mu SOHBET mi?)
+            tipo, resposta = self.processar_entrada(user_text)
+
+            # --- SİSTEM KOMUTU ---
+            if tipo == "KOMUT":
+                comando_powershell = resposta
+                print(f"[+] Üretilen Komut: {comando_powershell}")
+                self.assistantResponse.emit("Bu komutu onaylıyor musunuz?", comando_powershell)
+                falar("Bu komutu çalıştırayım mı?")
+                time.sleep(0.3)
+
+                conf_text = ""
                 try:
-                    self.falar("Deseja que eu execute esse comando?")
-                    # Mantém o comando na UI enquanto pede confirmação
-                    self.assistantResponse.emit("Deseja que eu execute esse comando?", comando_powershell)
-
                     with self.mic as source:
-                        self.recognizer.adjust_for_ambient_noise(source)
-                        # Tempo limite menor para confirmação
-                        audio_confirmacao = self.recognizer.listen(source, phrase_time_limit=3)
+                        self.recognizer.adjust_for_ambient_noise(source, duration=0.3)
+                        audio_conf = self.recognizer.listen(source, timeout=5, phrase_time_limit=4)
+                    conf_text = transcribe_audio(audio_conf).lower()
+                    print(f"🗣️ Onay: {conf_text}")
+                except Exception:
+                    conf_text = ""
 
-                    confirmacao = self.recognizer.recognize_google(audio_confirmacao, language="pt-BR").lower()
-                    print(f"🗣️ Transcrição da Confirmação: '{confirmacao}'")
+                if any(k in conf_text for k in ["evet", "tamam", "olur", "çalıştır", "yap", "onayla", "ok", "yes", "başlat"]):
+                    self.assistantResponse.emit("Komut çalıştırılıyor...", comando_powershell)
+                    resultado = self.executar_comando_powershell(comando_powershell)
+                    falar("Komut çalıştırıldı.")
+                    self.assistantResult.emit("Komut çalıştırıldı!", resultado)
+                    time.sleep(2)
+                else:
+                    self.assistantResult.emit("İşlem iptal edildi.", "")
+                    falar("İşlem iptal edildi.")
+                    time.sleep(1)
+                break
 
-                    # Lógica de confirmação mais flexível
-                    if any(k in confirmacao for k in ["sim", "s", "pode", "ok", "confirma", "executar"]):
-                        self.assistantResponse.emit("Executando comando...", comando_powershell)
-                        resultado = self.executar_comando_powershell(comando_powershell)
-                        print(f"\n[+] Resultado:\n{resultado}")
-                        self.falar("Comando executado.")
-                        self.assistantResult.emit("Comando executado!", resultado)
-                        command_processed = True  # Marca para sair do loop principal
-                        confirmacao_obtida_com_sucesso = True  # Marca para sair do loop de confirmação
-                    elif any(k in confirmacao for k in ["não", "nao", "cancelar", "sair"]):
-                        self.assistantResult.emit("Comando cancelado.", "")
-                        self.falar("Comando cancelado.")
-                        command_processed = True  # Marca para sair do loop principal
-                        confirmacao_obtida_com_sucesso = True  # Marca para sair do loop de confirmação
-                    else:  # Nenhuma das palavras-chave de confirmação/cancelamento foi detectada
-                        self.errorOccurred.emit(
-                            "Não entendi a confirmação. Por favor, diga 'sim' ou 'não' para este comando.")
-                        self.falar("Não entendi a confirmação. Por favor, diga 'sim' ou 'não' para este comando.")
-                        # Não muda confirmacao_obtida_com_sucesso, então o loop continua e repete a pergunta de confirmação
+            # --- SOHBET / SORU ---
+            elif tipo == "SOHBET":
+                print(f"[+] Sohbet Cevabı: {resposta}")
+                self.chatResponse.emit(user_text, resposta)
+                falar(resposta)
+                time.sleep(0.4)
 
-                except sr.UnknownValueError:
-                    self.errorOccurred.emit(
-                        "Não entendi a confirmação. Por favor, diga 'sim' ou 'não' para este comando.")
-                    self.falar("Não entendi a confirmação. Por favor, diga 'sim' ou 'não' para este comando.")
-                    # Não muda confirmacao_obtida_com_sucesso, então o loop continua e repete a pergunta de confirmação
-                except Exception as e:
-                    self.errorOccurred.emit(
-                        f"Erro ao ouvir confirmação: {e}. Por favor, tente novamente ou diga 'sim'/'não'.")
-                    self.falar(
-                        f"Ocorreu um erro ao ouvir a confirmação: {e}. Por favor, tente novamente ou diga 'sim'/'não'.")
-                    print(f"❌ Erro ao ouvir confirmação: {e}")
-                    # Não muda confirmacao_obtida_com_sucesso, então o loop continua e repete a pergunta de confirmação
-
-        # Só emite 'finished' quando o loop principal é encerrado
-        if command_processed:
-            self.finished.emit()
+        self.finished.emit()

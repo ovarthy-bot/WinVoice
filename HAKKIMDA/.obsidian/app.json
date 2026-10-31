@@ -1,0 +1,17 @@
+{
+  "promptDelete": false,
+  "alwaysUpdateLinks": true,
+  "attachmentFolderPath": "_Sistem/Ekler",
+  "defaultViewMode": "preview",
+  "mobileToolbarCommands": [
+    "atomik-hizli-ekle:hizli-ekle-menu"
+  ],
+  "pdfExportSettings": {
+    "includeName": false,
+    "pageSize": "Letter",
+    "landscape": false,
+    "margin": "0",
+    "downscalePercent": 100
+  },
+  "livePreview": false
+}

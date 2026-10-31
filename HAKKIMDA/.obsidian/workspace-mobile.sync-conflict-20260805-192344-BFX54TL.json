@@ -1,0 +1,193 @@
+{
+  "main": {
+    "id": "9b96bd59d2924fba",
+    "type": "split",
+    "children": [
+      {
+        "id": "eb9c0ad89183bd0e",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "65806b89350b1a4e",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "40_Teknoloji/Flutter Derleme ve Yayınlama Komutları.md",
+                "mode": "preview",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "Flutter Derleme ve Yayınlama Komutları"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "72b3ecea66c1469d",
+    "type": "mobile-drawer",
+    "children": [
+      {
+        "id": "32e4cbe2e0cacc3f",
+        "type": "leaf",
+        "state": {
+          "type": "file-explorer",
+          "state": {
+            "sortOrder": "alphabetical",
+            "autoReveal": false,
+            "showSearch": false,
+            "searchQuery": ""
+          },
+          "icon": "lucide-folder-closed",
+          "title": "Dosya Gezgini"
+        }
+      },
+      {
+        "id": "15fbc111c322821b",
+        "type": "leaf",
+        "state": {
+          "type": "search",
+          "state": {
+            "query": "",
+            "matchingCase": false,
+            "explainSearch": false,
+            "collapseAll": false,
+            "extraContext": false,
+            "sortOrder": "alphabetical"
+          },
+          "icon": "lucide-search",
+          "title": "Ara"
+        }
+      },
+      {
+        "id": "87180529dcc44e37",
+        "type": "leaf",
+        "state": {
+          "type": "tag",
+          "state": {
+            "sortOrder": "frequency",
+            "useHierarchy": true,
+            "showSearch": false,
+            "searchQuery": ""
+          },
+          "icon": "lucide-tags",
+          "title": "Etiketler"
+        }
+      },
+      {
+        "id": "884a92054e370f8c",
+        "type": "leaf",
+        "state": {
+          "type": "all-properties",
+          "state": {
+            "sortOrder": "frequency",
+            "showSearch": false,
+            "searchQuery": ""
+          },
+          "icon": "lucide-archive",
+          "title": "Tüm özellikler"
+        }
+      },
+      {
+        "id": "af373fd2b02df525",
+        "type": "leaf",
+        "state": {
+          "type": "bookmarks",
+          "state": {
+            "showSearch": false,
+            "searchQuery": ""
+          },
+          "icon": "lucide-bookmark",
+          "title": "Yer İmleri"
+        }
+      },
+      {
+        "id": "57230d04702afaeb",
+        "type": "leaf",
+        "state": {
+          "type": "mk-path-view",
+          "state": {},
+          "icon": "layout-grid",
+          "title": "Navigator"
+        }
+      }
+    ],
+    "currentTab": 0
+  },
+  "right": {
+    "id": "cc62ddb3eb8ac413",
+    "type": "mobile-drawer",
+    "children": [
+      {
+        "id": "57f570d7f90bd57a",
+        "type": "leaf",
+        "state": {
+          "type": "backlink",
+          "state": {
+            "file": "40_Teknoloji/Flutter Derleme ve Yayınlama Komutları.md",
+            "collapseAll": false,
+            "extraContext": false,
+            "sortOrder": "alphabetical",
+            "showSearch": false,
+            "searchQuery": "",
+            "backlinkCollapsed": false,
+            "unlinkedCollapsed": true
+          },
+          "icon": "links-coming-in",
+          "title": "Geri Bağlantılar"
+        }
+      },
+      {
+        "id": "ff222110cf1e5ce7",
+        "type": "leaf",
+        "state": {
+          "type": "outgoing-link",
+          "state": {
+            "file": "40_Teknoloji/Flutter Derleme ve Yayınlama Komutları.md",
+            "linksCollapsed": false,
+            "unlinkedCollapsed": true
+          },
+          "icon": "links-going-out",
+          "title": "Giden bağlantılar"
+        }
+      },
+      {
+        "id": "7e2469ccb6dee512",
+        "type": "leaf",
+        "state": {
+          "type": "outline",
+          "state": {
+            "file": "40_Teknoloji/Flutter Derleme ve Yayınlama Komutları.md",
+            "followCursor": false,
+            "showSearch": false,
+            "searchQuery": ""
+          },
+          "icon": "lucide-list",
+          "title": "Anahat"
+        }
+      }
+    ],
+    "currentTab": 0
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "switcher:Hızlı geçişi aç": false,
+      "graph:Grafik görünümünü aç": false,
+      "canvas:Yeni tuval oluşturun": false,
+      "daily-notes:Bugünün Notunu Aç": false,
+      "templates:Şablon ekle": false,
+      "command-palette:Komut paletini aç": false
+    }
+  },
+  "active": "65806b89350b1a4e",
+  "lastOpenFiles": [
+    "40_Teknoloji/Flutter Derleme ve Yayınlama Komutları.sync-conflict-20260802-175349-BFX54TL.md",
+    "40_Teknoloji/40_Teknoloji.md",
+    "Vault.md",
+    "00_Gelen_Kutusu/Öğrenilecek Kavramlar.md",
+    "00_Gelen_Kutusu/00_Gelen_Kutusu.md"
+  ]
+}

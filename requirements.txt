@@ -1,6 +1,10 @@
 pyttsx3
 langchain-ollama
-langchain
+langchain-core
 SpeechRecognition
 pyaudio
 PyQt5
+pywin32
+faster-whisper
+av<14
+Pillow

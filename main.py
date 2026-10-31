@@ -1,92 +1,182 @@
 import subprocess
-import pyttsx3
+# worker_threads, PyQt5'ten ÖNCE import edilmeli: faster-whisper'ın native
+# kütüphaneleri (ctranslate2/onnxruntime) PyQt5 yüklendikten sonra Whisper
+# modeli oluşturulursa Windows'ta DLL çakışmasından çöküyor (access violation).
+from worker_threads import HotwordListener, AssistantWorker
 from langchain_ollama.llms import OllamaLLM
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
 import speech_recognition as sr
 import sys
 import time
 from PyQt5.QtWidgets import QApplication
-from PyQt5.QtCore import QTimer, QCoreApplication
+from PyQt5.QtCore import QTimer, QCoreApplication, Qt
 from ui_manager import AssistantUI
-from worker_threads import HotwordListener, AssistantWorker
-from prompts import POWERSHELL_COMMAND_PROMPT
-import urllib.parse  # NOVO: Importar para codificação de URL
+from dashboard_ui import DailyDashboardWindow
+from prompts import POWERSHELL_AND_CHAT_PROMPT, DAILY_BRIEFING_PROMPT, VAULT_QA_PROMPT
+from personal_context import answer_calendar_query
+from vault_knowledge import answer_from_vault
+from persona_settings import current_persona_instructions
+import urllib.parse
+
+# Windows'un ekran ölçekleme ayarını (ör. %150/%200) Qt'ye tanıtır.
+# Bu olmadan Qt ekranı "ham" piksel çözünürlüğüyle görür ve arayüz
+# elemanları diğer pencerelere göre çok küçük/orantısız görünür.
+QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
 
 app_qt = QApplication(sys.argv)
+# Dashboard penceresi kapatılınca (ör. "Sesli Asistan" sayfasına geçmek
+# yerine X'e basılırsa) tüm uygulamanın kapanmasını engeller; hotword
+# dinleyici arka planda çalışmaya devam etmeli.
+app_qt.setQuitOnLastWindowClosed(False)
+
 assistant_ui = AssistantUI()
 
 llm = OllamaLLM(model="gemma3:4b")
-tts = pyttsx3.init()
 
 APPS = {
-    "the sims": r"C:\Program Files (x86)\DODI-Repacks\The Sims 4\Game\Bin\TS4_DX4_x64.exe",
-    "spotify": r"C:\Users\Clebs\AppData\Roaming\Spotify\Spotify.exe",
-    "navegador": r"C:\Program Files\LibreWolf\librewolf.exe"
+    "chrome": r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    "tarayıcı": r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    "not defteri": "notepad.exe",
+    "hesap makinesi": "calc.exe",
+    "görev yöneticisi": "taskmgr.exe",
+    "dosya gezgini": "explorer.exe",
+    "ayarlar": "start ms-settings:"
 }
 
 WEBSITES = {
-    "g1": "https://g1.globo.com",
     "youtube": "https://www.youtube.com",
     "google": "https://www.google.com",
-    "facebook": "https://www.facebook.com",
-    "instagram": "https://www.instagram.com",
+    "haberler": "https://www.haberler.com",
     "twitter": "https://x.com",
-    "whatsapp web": "https://web.whatsapp.com"
+    "x": "https://x.com",
+    "instagram": "https://www.instagram.com",
+    "facebook": "https://www.facebook.com",
+    "whatsapp": "https://web.whatsapp.com",
+    "github": "https://github.com"
 }
 
-prompt_template = PromptTemplate.from_template(POWERSHELL_COMMAND_PROMPT)
+prompt_template = PromptTemplate.from_template(POWERSHELL_AND_CHAT_PROMPT)
+briefing_prompt_template = PromptTemplate.from_template(DAILY_BRIEFING_PROMPT)
+vault_qa_prompt_template = PromptTemplate.from_template(VAULT_QA_PROMPT)
 
 
-def gerar_comando_llm(user_input: str) -> str:
-    user_input_lower = user_input.lower()
+def generate_daily_briefing(location: str, time_str: str, news_items_text: str) -> str:
+    """Günlük Dashboard'daki "Günlük Brifing" kartı için Giriş/Türkiye/Dünya/
+    Teknoloji/Kapanış bölümlerini üretir. Hava & Piyasa bölümü LLM'e hiç
+    verilmez — dashboard_ui.py tarafında tamamen deterministik olarak
+    kurulup bu metnin içine eklenir (küçük yerel modelin rakamları
+    güvenilir şekilde seslendiremediği görüldüğü için)."""
+    espri_talimati, arkadaslik_talimati = current_persona_instructions()
+    prompt = briefing_prompt_template.format(
+        location=location,
+        time=time_str,
+        news_items_text=news_items_text,
+        espri_talimati=espri_talimati,
+        arkadaslik_talimati=arkadaslik_talimati,
+    )
+    # Ollama uygulaması WinVoice ile (örn. baslat.bat ile) hemen hemen aynı
+    # anda başlatılmış olabilir ve modeli yüklemesi birkaç saniye sürebilir.
+    # Bu yüzden "bağlantı reddedildi" (WinError 10061) gibi geçici hatalarda
+    # birkaç kez yeniden denenir; toplamda ~50 saniye Ollama'nın hazır
+    # olmasına şans verilir.
+    last_error = None
+    for wait_seconds in (0, 3, 5, 8, 15, 20):
+        if wait_seconds:
+            time.sleep(wait_seconds)
+        try:
+            return llm.invoke(prompt).strip()
+        except Exception as e:
+            last_error = e
+    raise last_error
 
-    # 1. Verificar Mapeamento Direto de Aplicativos
+
+def processar_entrada(user_input: str) -> tuple[str, str]:
+    """
+    Kullanıcının girdisini değerlendirir:
+    Dönüş: ("KOMUT", <powershell_komutu>) veya ("SOHBET", <sesli_cevap>)
+    """
+    user_input_lower = user_input.lower().strip()
+
+    # 0. Takvim / Kişisel Hatırlatma Sorguları (doğum günü, randevu, ödeme
+    # tarihi vb.). LLM'e hiç gidilmez: tarih hesaplaması personal_context.py
+    # içinde Python ile deterministik yapılır (hava & piyasa brifinginde
+    # kullanılan aynı prensip — küçük yerel model tarih/sayı hesabına
+    # güvenilmiyor).
+    takvim_cevabi = answer_calendar_query(user_input_lower)
+    if takvim_cevabi:
+        return ("SOHBET", takvim_cevabi)
+
+    # 1. Doğrudan Tanımlı Uygulamalar
     for nome_app, caminho_app in APPS.items():
-        if nome_app in user_input_lower:
-            return f'Start-Process "{caminho_app}"'
+        if nome_app in user_input_lower and any(w in user_input_lower for w in ["aç", "başlat", "çalıştır"]):
+            return ("KOMUT", f'Start-Process "{caminho_app}"')
 
-    # 2. Verificar Mapeamento Direto de Sites
+    # 2. Doğrudan Tanımlı Web Siteleri
     for nome_site, url_site in WEBSITES.items():
-        if nome_site in user_input_lower:
-            return f'Start-Process "{url_site}"'
+        if nome_site in user_input_lower and any(w in user_input_lower for w in ["aç", "git", "sitesi"]):
+            return ("KOMUT", f'Start-Process "{url_site}"')
 
-    # 3. NOVO: Lógica para Pesquisa no Google
-    search_keywords = ["pesquisar por", "procurar por", "buscar por", "pesquisar", "procurar", "buscar"]
+    # 3. Google'da Arama İstekleri
+    search_keywords = ["google'da ara", "internette ara", "hakkında ara"]
     for keyword in search_keywords:
         if keyword in user_input_lower:
             search_query_raw = user_input_lower.split(keyword, 1)[1].strip()
-            if search_query_raw:  # Garante que há algo para pesquisar
-                # Codifica a consulta para URL
+            if not search_query_raw:
+                search_query_raw = user_input_lower.split(keyword, 1)[0].strip()
+            if search_query_raw:
                 search_query_encoded = urllib.parse.quote_plus(search_query_raw)
                 google_search_url = f"https://www.google.com/search?q={search_query_encoded}"
-                return f'Start-Process "{google_search_url}"'
+                return ("KOMUT", f'Start-Process "{google_search_url}"')
 
-    # 4. Tentar Extrair URL diretamente se "acessar" ou "abrir o site" for usado
-    if "acessar" in user_input_lower or "abrir o site" in user_input_lower:
+    # 4. Doğrudan URL Tespiti
+    if any(w in user_input_lower for w in ["aç", "git", "sitesini"]):
         parts = user_input_lower.split()
         for part in parts:
-            if "." in part and (
-                    "http" in part or "www" in part or part.endswith(".com") or part.endswith(".br") or part.endswith(
-                    ".org")):
+            if "." in part and ("http" in part or "www" in part or part.endswith(".com") or part.endswith(".com.tr") or part.endswith(".org") or part.endswith(".net")):
                 if not part.startswith("http"):
                     part = "https://" + part
-                return f'Start-Process "{part}"'
+                return ("KOMUT", f'Start-Process "{part}"')
 
-    # 5. Usar o LLM para gerar o comando se as verificações diretas falharem
-    prompt = prompt_template.format(user_input=user_input)
-    resposta = llm.invoke(prompt)
-    raw_command = resposta.strip()
+    # 4.5. Kişisel Not Kasası (HAKKIMDA) Sorguları — RAG: en ilgili notu
+    # bulup SADECE o notun içeriğine dayanarak cevap üretir (vault_knowledge.py).
+    # "aç/başlat/çalıştır/kapat" gibi bir komut belirtisi taşıyan ifadeler
+    # BURADA denenmez — APPS/WEBSITES sözlüğünde olmayan bir uygulama/dosya
+    # komutu (ör. "notepad aç") yanlışlıkla ilgisiz bir nota eşleşip komut
+    # üretiminin önüne geçmesin diye bu tür ifadeler doğrudan adım 5'teki
+    # LLM KOMUT/SOHBET sınıflandırmasına bırakılır.
+    comut_belirtisi = ["aç", "başlat", "çalıştır", "kapat", "sil", "oluştur", "kaydet"]
+    if not any(v in user_input_lower for v in comut_belirtisi):
+        vault_cevabi = answer_from_vault(llm, user_input, vault_qa_prompt_template)
+        if vault_cevabi:
+            return ("SOHBET", vault_cevabi)
 
-    # Lógica para remover backticks (formatação de código)
-    if raw_command.startswith('`') and raw_command.endswith('`'):
-        raw_command = raw_command.strip('`')
-    elif raw_command.startswith('```') and raw_command.endswith('```'):
-        raw_command = raw_command.strip('`').strip()
-        if raw_command.lower().startswith('powershell'):
-            raw_command = raw_command[len('powershell'):].strip()
+    # 5. LLM ile Analiz ve Üretim (KOMUT veya SOHBET)
+    espri_talimati, arkadaslik_talimati = current_persona_instructions()
+    prompt = prompt_template.format(
+        user_input=user_input,
+        espri_talimati=espri_talimati,
+        arkadaslik_talimati=arkadaslik_talimati,
+    )
+    raw_response = llm.invoke(prompt).strip()
 
-    print(f"Resposta do LLM (limpa): '{raw_command}'")
-    return raw_command
+    # Çıktı Ayrıştırma
+    if "SOHBET:" in raw_response:
+        msg = raw_response.split("SOHBET:", 1)[1].strip()
+        msg = msg.split("###")[0].strip().strip('`"\'')
+        return ("SOHBET", msg)
+    elif "KOMUT:" in raw_response:
+        cmd = raw_response.split("KOMUT:", 1)[1].strip()
+        cmd = cmd.split("###")[0].strip()
+        if cmd.startswith("```"):
+            lines = cmd.splitlines()
+            cmd = "\n".join([line for line in lines if not line.startswith("```")])
+        return ("KOMUT", cmd.strip().strip('`'))
+    else:
+        ps_indicators = ["start-process", "new-item", "get-childitem", "invoke-item", "remove-item", "stop-process", "stop-computer", "restart-computer", "$env:"]
+        if any(ind in raw_response.lower() for ind in ps_indicators):
+            return ("KOMUT", raw_response)
+        return ("SOHBET", raw_response)
 
 
 def executar_comando_powershell_subprocess(comando: str) -> str:
@@ -98,42 +188,54 @@ def executar_comando_powershell_subprocess(comando: str) -> str:
                 ["powershell", "-Command", cmd],
                 capture_output=True,
                 text=True,
-                encoding='cp1252',
+                encoding='utf-8',
                 errors='replace',
                 timeout=30
             )
             saida_total += (resultado.stdout or '') + (resultado.stderr or '')
         return saida_total
     except Exception as e:
-        return f"Erro ao executar: {e}"
+        return f"Çalıştırma hatası: {e}"
 
 
-def falar_tts(texto):
-    tts.say(texto)
-    tts.runAndWait()
+hotword_listener_thread = HotwordListener(hotword="bilgisayar")
 
-
-hotword_listener_thread = HotwordListener(hotword="computador")
-assistant_worker_thread = AssistantWorker(
-    llm=llm,
-    tts=tts,
-    gerar_comando_func=gerar_comando_llm,
-    executar_comando_powershell_func=executar_comando_powershell_subprocess,
-    falar_func=falar_tts
+daily_dashboard = DailyDashboardWindow(
+    process_input_func=processar_entrada,
+    execute_powershell_func=executar_comando_powershell_subprocess,
+    pause_hotword_func=hotword_listener_thread.pause_and_wait,
+    resume_hotword_func=hotword_listener_thread.resume,
+    generate_briefing_func=generate_daily_briefing,
+    set_listening_muted_func=hotword_listener_thread.set_muted,
 )
 
-hotword_listener_thread.statusUpdate.connect(assistant_ui.update_status_message)
-hotword_listener_thread.hotwordDetected.connect(assistant_worker_thread.start)
+assistant_worker_thread = AssistantWorker(
+    llm=llm,
+    processar_entrada_func=processar_entrada,
+    executar_powershell_func=executar_comando_powershell_subprocess
+)
 
-assistant_worker_thread.assistantResponse.connect(assistant_ui.show_command_and_status)
-assistant_worker_thread.assistantResult.connect(assistant_ui.show_final_result)
 
-assistant_worker_thread.errorOccurred.connect(assistant_ui.update_status_message)
+def on_hotword_detected():
+    hotword_listener_thread.pause()
+    assistant_worker_thread.start()
 
-assistant_worker_thread.finished.connect(assistant_ui.hide_window)
-assistant_worker_thread.finished.connect(
-    lambda: hotword_listener_thread.statusUpdate.emit(f"Diga '{hotword_listener_thread.hotword}' para ativar."))
 
-hotword_listener_thread.start()
+def on_assistant_finished():
+    assistant_ui.hide_window()
+    hotword_listener_thread.statusUpdate.emit(f"Etkinleştirmek için '{hotword_listener_thread.hotword}' deyin.")
+    hotword_listener_thread.resume()
 
-sys.exit(app_qt.exec_())
+
+if __name__ == "__main__":
+    hotword_listener_thread.statusUpdate.connect(assistant_ui.update_status_message)
+    hotword_listener_thread.hotwordDetected.connect(on_hotword_detected)
+
+    assistant_worker_thread.assistantResponse.connect(assistant_ui.show_command_and_status)
+    assistant_worker_thread.assistantResult.connect(assistant_ui.show_final_result)
+    assistant_worker_thread.chatResponse.connect(assistant_ui.show_chat_message)
+    assistant_worker_thread.errorOccurred.connect(assistant_ui.update_status_message)
+    assistant_worker_thread.finished.connect(on_assistant_finished)
+
+    hotword_listener_thread.start()
+    sys.exit(app_qt.exec_())

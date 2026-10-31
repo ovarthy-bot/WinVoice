@@ -1,0 +1,47 @@
+.atomik-hizli-ekle-modal .setting-item {
+  align-items: flex-start;
+}
+
+.atomik-hizli-ekle-modal .setting-item-info {
+  min-width: 170px;
+}
+
+.atomik-hizli-ekle-modal .setting-item-control {
+  flex: 1;
+}
+
+.atomik-hizli-ekle-modal .atomik-wide-input {
+  width: 100%;
+  min-width: min(420px, 55vw);
+}
+
+.atomik-form-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.atomik-menu-title {
+  font-weight: 600;
+}
+
+.atomik-menu-description {
+  display: block;
+  color: var(--text-muted);
+  margin-top: 3px;
+}
+
+@media (max-width: 600px) {
+  .atomik-hizli-ekle-modal .setting-item {
+    display: block;
+  }
+  .atomik-hizli-ekle-modal .setting-item-control {
+    width: 100%;
+    margin-top: 8px;
+  }
+  .atomik-hizli-ekle-modal .atomik-wide-input {
+    min-width: 0;
+    width: 100%;
+  }
+}

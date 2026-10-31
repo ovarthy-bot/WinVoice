@@ -1,0 +1,19 @@
+views:
+  - type: table
+    name: Tablo
+    order:
+      - file.name
+      - type
+      - Ev lokasyon
+      - etiket
+    sort:
+      - property: Ev lokasyon
+        direction: ASC
+  - type: cards
+    name: Görünüm
+    groupBy:
+      property: type
+      direction: ASC
+    order:
+      - file.name
+    image: note.kapak

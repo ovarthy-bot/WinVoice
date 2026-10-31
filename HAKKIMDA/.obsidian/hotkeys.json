@@ -1,0 +1,20 @@
+{
+  "atomik-hizli-ekle:hizli-ekle-menu": [
+    {
+      "modifiers": [
+        "Ctrl",
+        "Alt"
+      ],
+      "key": "N"
+    }
+  ],
+  "atomik-hizli-ekle:hizli-yakala": [
+    {
+      "modifiers": [
+        "Ctrl",
+        "Alt"
+      ],
+      "key": "H"
+    }
+  ]
+}

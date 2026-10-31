@@ -1,0 +1,9 @@
+{
+  "id": "atomik-hizli-ekle",
+  "name": "Atomik Hızlı Ekle",
+  "version": "1.0.0",
+  "minAppVersion": "1.0.0",
+  "description": "Gelen kutusu ve ana alanlar için hızlı, ilişkili not oluşturma menüsü.",
+  "author": "OpenAI",
+  "isDesktopOnly": false
+}
