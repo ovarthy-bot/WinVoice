@@ -1,13 +1,19 @@
 # persona_settings.py
 #
 # Dashboard > Ayarlar sayfasındaki "Espri" ve "Arkadaş canlısı yaklaşım"
-# yüzde kaydırıcılarını (settings.json üzerinden, bkz. worker_threads.py'deki
+# yüzde kaydırıcılarını (settings.json üzerinden, bkz. tts_engine.py'deki
 # get_setting/set_setting) okuyup bunları LLM prompt'larına (prompts.py)
 # eklenecek hazır Türkçe talimat cümlelerine çevirir. Tek bir yerden
 # yönetilir ki hem dashboard_ui.py (kaydırıcıları çizip kaydeder) hem de
-# main.py (bu değerleri prompt'a enjekte eder) aynı ayar anahtarlarını kullansın.
+# main.py / telegram_briefing.py (bu değerleri prompt'a enjekte eder) aynı
+# ayar anahtarlarını kullansın.
+#
+# get_setting/set_setting doğrudan tts_engine'den alınır (worker_threads
+# üzerinden DEĞİL): worker_threads içe aktarıldığında faster-whisper modelini
+# anında yükler, bu da PyQt arayüzü gerekmeyen bağlamlarda (ör.
+# telegram_briefing.py) gereksiz ve ağır bir bağımlılık olur.
 
-from worker_threads import get_setting, set_setting
+from tts_engine import get_setting, set_setting
 
 ESPRI_KEY = "persona_espri_pct"
 ARKADASLIK_KEY = "persona_arkadas_pct"

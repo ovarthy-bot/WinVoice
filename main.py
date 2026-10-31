@@ -16,6 +16,7 @@ from prompts import POWERSHELL_AND_CHAT_PROMPT, DAILY_BRIEFING_PROMPT, VAULT_QA_
 from personal_context import answer_calendar_query
 from vault_knowledge import answer_from_vault
 from persona_settings import current_persona_instructions
+from llm_settings import get_llm_model, set_llm_model
 import urllib.parse
 
 # Windows'un ekran ölçekleme ayarını (ör. %150/%200) Qt'ye tanıtır.
@@ -32,7 +33,18 @@ app_qt.setQuitOnLastWindowClosed(False)
 
 assistant_ui = AssistantUI()
 
-llm = OllamaLLM(model="gemma3:4b")
+llm = OllamaLLM(model=get_llm_model())
+
+
+def set_active_llm_model(model_id):
+    """Dashboard > Ayarlar'da model seçimi değiştirildiğinde çağrılır: global
+    `llm`'i yeni modelle yeniden kurar ve seçimi settings.json'a kaydeder.
+    main.py'deki fonksiyonlar `llm`'e her çağrıda modül seviyesindeki global
+    üzerinden eriştiği için (bkz. processar_entrada, generate_daily_briefing),
+    bu yeniden atama anında tüm asistanın kullandığı modeli değiştirir."""
+    global llm
+    llm = OllamaLLM(model=model_id)
+    set_llm_model(model_id)
 
 APPS = {
     "chrome": r"C:\Program Files\Google\Chrome\Application\chrome.exe",
@@ -207,6 +219,7 @@ daily_dashboard = DailyDashboardWindow(
     resume_hotword_func=hotword_listener_thread.resume,
     generate_briefing_func=generate_daily_briefing,
     set_listening_muted_func=hotword_listener_thread.set_muted,
+    set_llm_model_func=set_active_llm_model,
 )
 
 assistant_worker_thread = AssistantWorker(

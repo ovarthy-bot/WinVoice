@@ -1,14 +1,9 @@
-import html
 import io
-import json
 import os
-import re
 import subprocess
 import threading
 import time
 from datetime import datetime
-import urllib.request
-import xml.etree.ElementTree as ET
 
 import win32api
 import win32con
@@ -28,11 +23,13 @@ from worker_threads import (
     speak_text, speak_text_interruptible, list_turkish_voices, get_selected_voice_id,
     set_selected_voice_id, get_setting, set_setting,
 )
-from tr_numbers import currency_to_words, percent_to_words, plain_number_to_words
-from personal_context import build_reminder_block
 from persona_settings import (
     get_espri_pct, set_espri_pct, get_arkadaslik_pct, set_arkadaslik_pct,
 )
+from llm_settings import AVAILABLE_LLM_MODELS, get_llm_model
+import briefing_data
+import briefing_text as briefing_text_module
+import tr_dates
 
 # "Müzik Çal" hızlı işlem butonuyla açılan varsayılan müzik çalar
 ORCHARD_EXE_PATH = r"C:\Users\Onur\Documents\GitHub\orchard\build\dev\orchard.exe"
@@ -45,38 +42,14 @@ ACCENT = "#F59E0B"
 ACCENT_STRONG = "#D97706"
 ACCENT_SOFT = "#FDE68A"
 
-# Çatalca / İstanbul koordinatları
-LATITUDE = 41.1431
-LONGITUDE = 28.4606
-
-TR_MONTHS = ["Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran",
-             "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"]
-TR_DAYS = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"]
-
-# WMO hava durumu kodları -> (açıklama, emoji)
-WEATHER_CODES = {
-    0: ("Açık", "☀️"),
-    1: ("Az bulutlu", "🌤️"),
-    2: ("Parçalı Bulutlu", "⛅"),
-    3: ("Kapalı", "☁️"),
-    45: ("Sisli", "🌫️"),
-    48: ("Kırağı sisi", "🌫️"),
-    51: ("Hafif çisenti", "🌦️"),
-    53: ("Çisenti", "🌦️"),
-    55: ("Yoğun çisenti", "🌦️"),
-    61: ("Hafif Yağmur", "🌧️"),
-    63: ("Yağmur", "🌧️"),
-    65: ("Şiddetli yağmur", "🌧️"),
-    71: ("Hafif kar", "🌨️"),
-    73: ("Kar", "🌨️"),
-    75: ("Yoğun kar", "🌨️"),
-    80: ("Sağanak", "🌦️"),
-    81: ("Kuvvetli sağanak", "🌧️"),
-    82: ("Şiddetli sağanak", "⛈️"),
-    95: ("Gök gürültülü fırtına", "⛈️"),
-    96: ("Dolu ile fırtına", "⛈️"),
-    99: ("Şiddetli dolu fırtınası", "⛈️"),
-}
+# Konum/WMO hava durumu kodları ve Türkçe tarih biçimleme artık
+# briefing_data.py / tr_dates.py'de (dashboard'suz telegram_briefing.py
+# tarafından da kullanılabilsin diye).
+WEATHER_CODES = briefing_data.WEATHER_CODES
+TR_MONTHS = tr_dates.TR_MONTHS
+TR_DAYS = tr_dates.TR_DAYS
+format_tr_date = tr_dates.format_tr_date
+format_tr_date_short = tr_dates.format_tr_date_short
 
 
 # "Akıllı Ev Kontrolleri" kartındaki görsel yer tutucu cihazlar. Hiçbiri
@@ -89,14 +62,6 @@ SMART_HOME_DEVICES = [
     {"id": "termostat", "icon": "🌡️", "title": "Termostat", "subtitle": "18°C · Otomatik"},
     {"id": "guvenlik_kilit", "icon": "🔒", "title": "Güvenlik", "subtitle": "Akıllı Kilit"},
 ]
-
-
-def format_tr_date(dt: datetime) -> str:
-    return f"{dt.day} {TR_MONTHS[dt.month - 1]} {dt.year} {TR_DAYS[dt.weekday()]}"
-
-
-def format_tr_date_short(dt: datetime) -> str:
-    return f"{dt.day} {TR_MONTHS[dt.month - 1]}"
 
 
 def _load_blurred_background(path, target_size):
@@ -131,54 +96,9 @@ def _load_blurred_background(path, target_size):
         return None
 
 
-# --------------------------------------------------------------------------- #
-# Günlük Brifing: ham veri kaynakları (hepsi ücretsiz, API anahtarı gerekmez)
-# --------------------------------------------------------------------------- #
-
-NEWS_AI_RSS_URL = "https://techcrunch.com/category/artificial-intelligence/feed/"
-NEWS_TURKEY_RSS_URL = "https://www.ntv.com.tr/gundem.rss"
-NEWS_WORLD_RSS_URL = "https://www.ntv.com.tr/dunya.rss"
-
-TCMB_RATES_URL = "https://www.tcmb.gov.tr/kurlar/today.xml"
-BIST100_URL = "https://query1.finance.yahoo.com/v8/finance/chart/XU100.IS"
-GOLD_FUTURES_URL = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
-BTC_PRICE_URL = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=try,usd"
-GRAMS_PER_OUNCE = 31.1034768
-
-NEWS_SUMMARY_MAX_LEN = 200
-
-# Küçük/yerel LLM'in (gemma3:4b) her zaman güvenilir şekilde filtrelemesini
-# beklemek risklidir; bu yüzden en belirgin tık tuzağı (clickbait) kalıpları
-# LLM'e hiç gitmeden burada, kod seviyesinde deterministik olarak eleniyor.
-CLICKBAIT_PATTERNS = [
-    "son dakika", "açıklandı", "sorgulama", "canlı sonuç", "canlı sonuçlar",
-    "çekiliş sonuçları", "kazandıran numaralar", "sorgula",
-]
-
-
-def _is_clickbait(title):
-    lower = title.lower().strip()
-    if lower.endswith("?"):
-        return True
-    return any(pattern in lower for pattern in CLICKBAIT_PATTERNS)
-
-
-def _strip_html(text):
-    if not text:
-        return ""
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = html.unescape(text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
-
-
-def _truncate(text, max_len=NEWS_SUMMARY_MAX_LEN):
-    if not text:
-        return ""
-    if len(text) <= max_len:
-        return text
-    return text[:max_len].rstrip() + "…"
-
+# Günlük Brifing'in ham veri kaynakları (hava/haber/piyasa) artık
+# briefing_data.py'de — fetch mantığı dashboard'suz telegram_briefing.py ile
+# de paylaşılsın diye (bkz. WeatherFetchThread/NewsFetchThread/FinanceFetchThread).
 
 # --------------------------------------------------------------------------- #
 # Yardımcı widget'lar
@@ -308,28 +228,7 @@ class WeatherFetchThread(QThread):
 
     def run(self):
         try:
-            url = (
-                "https://api.open-meteo.com/v1/forecast"
-                f"?latitude={LATITUDE}&longitude={LONGITUDE}"
-                "&current=temperature_2m,relative_humidity_2m,surface_pressure,wind_speed_10m,weather_code"
-                "&daily=weather_code,temperature_2m_max,temperature_2m_min"
-                "&timezone=Europe%2FIstanbul&forecast_days=7"
-            )
-            with urllib.request.urlopen(url, timeout=10) as response:
-                data = json.loads(response.read().decode("utf-8"))
-
-            current = data["current"]
-            daily = data["daily"]
-            days = []
-            for i in range(len(daily["time"])):
-                days.append({
-                    "date": daily["time"][i],
-                    "code": daily["weather_code"][i],
-                    "tmax": daily["temperature_2m_max"][i],
-                    "tmin": daily["temperature_2m_min"][i],
-                })
-
-            self.weatherReady.emit({"current": current, "days": days})
+            self.weatherReady.emit(briefing_data.fetch_weather())
         except Exception as e:
             self.weatherError.emit(str(e))
 
@@ -343,84 +242,8 @@ class WeatherFetchThread(QThread):
 class NewsFetchThread(QThread):
     newsReady = pyqtSignal(str)
 
-    def _http_get(self, url):
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=10) as response:
-            return response.read()
-
-    def _fetch_rss2_items(self, url, limit):
-        try:
-            data = self._http_get(url)
-            root = ET.fromstring(data)
-            results = []
-            for item in root.findall("./channel/item"):
-                title = _strip_html(item.findtext("title") or "")
-                if not title or _is_clickbait(title):
-                    continue
-                summary = _truncate(_strip_html(item.findtext("description") or ""))
-                results.append({"title": title, "summary": summary})
-                if len(results) >= limit:
-                    break
-            return results
-        except Exception as e:
-            print(f"⚠️ RSS alınamadı ({url}): {e}")
-            return []
-
-    def _fetch_atom_items(self, url, limit):
-        try:
-            data = self._http_get(url)
-            root = ET.fromstring(data)
-            ns = {"a": "http://www.w3.org/2005/Atom"}
-            results = []
-            for entry in root.findall("a:entry", ns):
-                title = _strip_html(entry.findtext("a:title", namespaces=ns) or "")
-                if not title or _is_clickbait(title):
-                    continue
-                summary = _truncate(_strip_html(entry.findtext("a:summary", namespaces=ns) or ""))
-                results.append({"title": title, "summary": summary})
-                if len(results) >= limit:
-                    break
-            return results
-        except Exception as e:
-            print(f"⚠️ RSS alınamadı ({url}): {e}")
-            return []
-
-    @staticmethod
-    def _format_block(category_label, items):
-        lines = []
-        for item in items:
-            line = f"[{category_label}] {item['title']}"
-            if item.get("summary"):
-                line += f" — {item['summary']}"
-            lines.append(line)
-        return lines
-
     def run(self):
-        turkey_items = self._fetch_atom_items(NEWS_TURKEY_RSS_URL, limit=6)
-        world_items = self._fetch_atom_items(NEWS_WORLD_RSS_URL, limit=5)
-        ai_items = self._fetch_rss2_items(NEWS_AI_RSS_URL, limit=3)
-
-        # NTV'nin gündem ve dünya akışları aynı haberi (ör. bir piyango
-        # haberini) iki kategoride birden yayınlayabiliyor; aynı başlık
-        # ikinci kez geçerse ilk gördüğü kategoride tutulur.
-        seen_titles = set()
-        for items in (turkey_items, world_items, ai_items):
-            deduped = []
-            for item in items:
-                key = item["title"].lower().strip()
-                if key in seen_titles:
-                    continue
-                seen_titles.add(key)
-                deduped.append(item)
-            items[:] = deduped
-
-        lines = []
-        lines += self._format_block("TÜRKİYE", turkey_items)
-        lines += self._format_block("DÜNYA", world_items)
-        lines += self._format_block("TEKNOLOJİ", ai_items)
-
-        news_items_text = "\n".join(lines) if lines else "(Haber akışı alınamadı.)"
-        self.newsReady.emit(news_items_text)
+        self.newsReady.emit(briefing_data.fetch_news_items_text())
 
 
 # --------------------------------------------------------------------------- #
@@ -431,50 +254,8 @@ class NewsFetchThread(QThread):
 class FinanceFetchThread(QThread):
     financeReady = pyqtSignal(dict)
 
-    def _http_get_json(self, url):
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=10) as response:
-            return json.loads(response.read().decode("utf-8"))
-
     def run(self):
-        result = {}
-        usd_try = None
-
-        try:
-            req = urllib.request.Request(TCMB_RATES_URL, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=10) as response:
-                root = ET.fromstring(response.read())
-            usd_el = root.find("./Currency[@Kod='USD']")
-            usd_try = float(usd_el.findtext("ForexSelling"))
-            result["usd_try_satis"] = round(usd_try, 4)
-        except Exception as e:
-            print(f"⚠️ Dolar kuru alınamadı: {e}")
-
-        try:
-            data = self._http_get_json(BIST100_URL)
-            meta = data["chart"]["result"][0]["meta"]
-            result["bist100"] = round(meta["regularMarketPrice"], 2)
-            result["bist100_gunluk_yuzde_degisim"] = round(meta.get("regularMarketChangePercent", 0), 2)
-        except Exception as e:
-            print(f"⚠️ BIST100 verisi alınamadı: {e}")
-
-        try:
-            data = self._http_get_json(GOLD_FUTURES_URL)
-            meta = data["chart"]["result"][0]["meta"]
-            gold_usd_oz = meta["regularMarketPrice"]
-            if usd_try:
-                result["gram_altin_try"] = round((gold_usd_oz * usd_try) / GRAMS_PER_OUNCE, 2)
-        except Exception as e:
-            print(f"⚠️ Altın verisi alınamadı: {e}")
-
-        try:
-            data = self._http_get_json(BTC_PRICE_URL)
-            result["btc_try"] = data["bitcoin"]["try"]
-            result["btc_usd"] = data["bitcoin"]["usd"]
-        except Exception as e:
-            print(f"⚠️ BTC verisi alınamadı: {e}")
-
-        self.financeReady.emit(result)
+        self.financeReady.emit(briefing_data.fetch_finance())
 
 
 # --------------------------------------------------------------------------- #
@@ -690,7 +471,8 @@ class MusicLaunchThread(QThread):
 class DailyDashboardWindow(QWidget):
     def __init__(self, process_input_func=None, execute_powershell_func=None,
                  pause_hotword_func=None, resume_hotword_func=None,
-                 generate_briefing_func=None, set_listening_muted_func=None):
+                 generate_briefing_func=None, set_listening_muted_func=None,
+                 set_llm_model_func=None):
         super().__init__()
         self._process_input_func = process_input_func
         self._execute_powershell_func = execute_powershell_func
@@ -698,6 +480,7 @@ class DailyDashboardWindow(QWidget):
         self._resume_hotword_func = resume_hotword_func
         self._generate_briefing_func = generate_briefing_func
         self._set_listening_muted_func = set_listening_muted_func
+        self._set_llm_model_func = set_llm_model_func
         self._listening_muted = False
 
         self.setWindowTitle("WinVoice - Günlük Dashboard")
@@ -986,6 +769,7 @@ class DailyDashboardWindow(QWidget):
         layout.addLayout(header)
 
         layout.addWidget(self._build_persona_settings_card())
+        layout.addWidget(self._build_llm_settings_card())
         layout.addWidget(self._build_voice_settings_card())
         layout.addStretch()
 
@@ -1067,6 +851,71 @@ class DailyDashboardWindow(QWidget):
 
         return card
 
+    def _build_llm_settings_card(self):
+        card = self._card_frame()
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(22, 20, 22, 20)
+        card_layout.setSpacing(14)
+
+        header = QHBoxLayout()
+        header.addWidget(IconBadge("🧠", bg_color="transparent", fg_color=ACCENT, size=28, font_size=18))
+        header_text = QVBoxLayout()
+        header_text.setSpacing(0)
+        t1 = QLabel("Yapay Zeka Modeli")
+        t1.setStyleSheet("font-size: 15px; font-weight: 600; color: #F1F5F9;")
+        t2 = QLabel("Asistanın komutları yorumlarken kullanacağı yerel model")
+        t2.setStyleSheet("font-size: 11px; color: #8592A6;")
+        header_text.addWidget(t1)
+        header_text.addWidget(t2)
+        header.addSpacing(6)
+        header.addLayout(header_text)
+        header.addStretch()
+        card_layout.addLayout(header)
+        card_layout.addWidget(Divider())
+
+        selected_id = get_llm_model()
+        self._llm_radio_group = QButtonGroup(card)
+
+        for model in AVAILABLE_LLM_MODELS:
+            row_widget = QWidget()
+            row = QVBoxLayout(row_widget)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(2)
+            radio = QRadioButton(model["label"])
+            radio.setStyleSheet("""
+                QRadioButton { font-size: 14px; color: #E5E7EB; padding: 4px 0; spacing: 8px; }
+                QRadioButton::indicator { width: 16px; height: 16px; }
+            """)
+            radio.setFixedHeight(26)
+            radio.setChecked(model["id"] == selected_id)
+            radio.toggled.connect(
+                lambda checked, m=model: self._on_llm_radio_toggled(m) if checked else None
+            )
+            self._llm_radio_group.addButton(radio)
+            desc_label = QLabel(model["desc"])
+            desc_label.setStyleSheet("font-size: 11px; color: #8592A6; padding-left: 24px;")
+            row.addWidget(radio)
+            row.addWidget(desc_label)
+            row_widget.setMinimumHeight(46)
+            card_layout.addWidget(row_widget)
+
+        card_layout.addWidget(Divider())
+
+        self.llm_settings_status_label = QLabel("")
+        self.llm_settings_status_label.setStyleSheet("font-size: 12px; color: #8592A6;")
+        card_layout.addWidget(self.llm_settings_status_label)
+
+        return card
+
+    def _on_llm_radio_toggled(self, model):
+        if self._set_llm_model_func:
+            try:
+                self._set_llm_model_func(model["id"])
+            except Exception as e:
+                self.llm_settings_status_label.setText(f"⚠️ Model değiştirilemedi: {e}")
+                return
+        self.llm_settings_status_label.setText(f"Kaydedildi: {model['label']}")
+
     def _build_voice_settings_card(self):
         card = self._card_frame()
         card_layout = QVBoxLayout(card)
@@ -1109,8 +958,10 @@ class DailyDashboardWindow(QWidget):
             for voice in voices:
                 radio = QRadioButton(voice["description"])
                 radio.setStyleSheet("""
-                    QRadioButton { font-size: 14px; color: #E5E7EB; padding: 6px 0; }
+                    QRadioButton { font-size: 14px; color: #E5E7EB; padding: 6px 0; spacing: 8px; }
+                    QRadioButton::indicator { width: 16px; height: 16px; }
                 """)
+                radio.setMinimumHeight(28)
                 radio.setChecked(voice["id"] == selected_id)
                 radio.toggled.connect(
                     lambda checked, v=voice: self._on_voice_radio_toggled(v) if checked else None
@@ -1722,113 +1573,6 @@ class DailyDashboardWindow(QWidget):
     # ------------------------------------------------------------------- #
     # Günlük sesli brifing (LLM ile üretilir, sonra TTS ile okunur)
     # ------------------------------------------------------------------- #
-    def _weather_phrases_for_briefing(self):
-        """Hava verisindeki rakamları LLM'e göndermeden önce, burada
-        deterministik olarak hazır Türkçe ifadelere çevirir (bkz. tr_numbers.py)."""
-        w = self._weather_data_for_briefing or {}
-        phrases = {}
-        if w.get("sicaklik_c") is not None:
-            phrases["sicaklik"] = f"{plain_number_to_words(w['sicaklik_c'])} derece"
-        if w.get("aciklama"):
-            phrases["hava_durumu_aciklamasi"] = w["aciklama"]
-        if w.get("nem_yuzde") is not None:
-            phrases["nem_orani"] = percent_to_words(w["nem_yuzde"])
-        if w.get("ruzgar_kmh") is not None:
-            phrases["ruzgar_hizi"] = f"saatte {plain_number_to_words(w['ruzgar_kmh'])} kilometre"
-        if w.get("bugun_max_c") is not None:
-            phrases["bugun_en_yuksek_sicaklik"] = f"{plain_number_to_words(w['bugun_max_c'])} derece"
-        if w.get("bugun_min_c") is not None:
-            phrases["bugun_en_dusuk_sicaklik"] = f"{plain_number_to_words(w['bugun_min_c'])} derece"
-        return phrases
-
-    def _finance_phrases_for_briefing(self):
-        """Piyasa verisindeki rakamları LLM'e göndermeden önce, burada
-        deterministik olarak hazır Türkçe ifadelere çevirir (bkz. tr_numbers.py)."""
-        f = self._finance_data or {}
-        phrases = {}
-        if f.get("usd_try_satis") is not None:
-            phrases["dolar_tl_satis_kuru"] = currency_to_words(f["usd_try_satis"])
-        if f.get("bist100") is not None:
-            phrases["bist100_endeksi"] = f"{plain_number_to_words(f['bist100'])} puan"
-        if f.get("bist100_gunluk_yuzde_degisim") is not None:
-            phrases["bist100_gunluk_degisim"] = percent_to_words(f["bist100_gunluk_yuzde_degisim"])
-        if f.get("gram_altin_try") is not None:
-            phrases["gram_altin_fiyati"] = currency_to_words(f["gram_altin_try"])
-        if f.get("btc_try") is not None:
-            phrases["bitcoin_tl_karsiligi"] = f"{plain_number_to_words(f['btc_try'])} lira"
-        if f.get("btc_usd") is not None:
-            phrases["bitcoin_dolar_karsiligi"] = f"{plain_number_to_words(f['btc_usd'])} dolar"
-        return phrases
-
-    def _build_weather_finance_paragraph(self):
-        """Hava & Piyasa paragrafını LLM'e hiç yazdırmadan, tamamen
-        deterministik olarak kurar. Testlerde küçük yerel modelin (gemma3:4b)
-        hazır Türkçe rakam ifadelerini bile ara sıra yanlış kopyaladığı
-        (ör. "yetmiş dokuz" yerine "seksen dokuz" yazması) görüldü; bu
-        yüzden rakam içeren tek bölüm LLM'in eline hiç bırakılmıyor."""
-        w = self._weather_phrases_for_briefing()
-        f = self._finance_phrases_for_briefing()
-
-        sentences = []
-        if w.get("hava_durumu_aciklamasi") and w.get("sicaklik"):
-            weather_sentence = (
-                f"Hava durumuna gelirsek; İstanbul Çatalca'da hava "
-                f"{w['hava_durumu_aciklamasi'].lower()}, sıcaklık {w['sicaklik']}"
-            )
-            if w.get("nem_orani"):
-                weather_sentence += f", nem oranı {w['nem_orani']}"
-            if w.get("ruzgar_hizi"):
-                weather_sentence += f", rüzgar hızı {w['ruzgar_hizi']}"
-            sentences.append(weather_sentence + ".")
-
-        finance_bits = []
-        if f.get("dolar_tl_satis_kuru"):
-            finance_bits.append(f"dolar {f['dolar_tl_satis_kuru']} seviyesinde")
-        if f.get("bist100_endeksi"):
-            bist_bit = f"BIST 100 endeksi {f['bist100_endeksi']}"
-            if f.get("bist100_gunluk_degisim"):
-                bist_bit += f" ile günü {f['bist100_gunluk_degisim']} değişimle tamamlıyor"
-            finance_bits.append(bist_bit)
-        if f.get("gram_altin_fiyati"):
-            finance_bits.append(f"gram altın {f['gram_altin_fiyati']}")
-        if f.get("bitcoin_tl_karsiligi"):
-            btc_bit = f"Bitcoin {f['bitcoin_tl_karsiligi']}"
-            if f.get("bitcoin_dolar_karsiligi"):
-                btc_bit += f" ({f['bitcoin_dolar_karsiligi']})"
-            finance_bits.append(btc_bit)
-        if finance_bits:
-            sentences.append("Piyasalara bakacak olursak; " + ", ".join(finance_bits) + ".")
-
-        return " ".join(sentences)
-
-    def _build_personal_reminders_paragraph(self):
-        """Doğum Günleri ve Randevular.md'deki yaklaşan (14 gün içindeki)
-        kayıtları, hava & piyasa paragrafıyla aynı mantıkla (bkz.
-        _build_weather_finance_paragraph) tamamen deterministik olarak
-        hazırlar; LLM'in eline hiç bırakılmaz."""
-        block = build_reminder_block(within_days=14)
-        if not block:
-            return ""
-        return "Kişisel hatırlatmalara gelirsek; " + block
-
-    _KNOWN_SECTION_HEADER_RE = re.compile(
-        r"^\s*(giriş|hava\s*&\s*piyasa|hava\s+ve\s+piyasa|türkiye\s+gündemi|"
-        r"dünya\s+turu|teknoloji|kapanış)\s*:\s*",
-        re.IGNORECASE,
-    )
-
-    @classmethod
-    def _strip_known_section_headers(cls, text):
-        """LLM, talimata uymayıp ara sıra 'Türkiye Gündemi: ...' gibi bölüm
-        başlıklarını (tek başına bir satır olarak ya da bir paragrafın başına
-        yapıştırarak) çıktıya yazabiliyor; bunlar TTS'te garip durduğu için
-        hem tek başına hem de bir paragrafın önüne eklenmiş hallerinde eleniyor."""
-        cleaned_lines = []
-        for line in text.split("\n"):
-            line = cls._KNOWN_SECTION_HEADER_RE.sub("", line, count=1)
-            cleaned_lines.append(line)
-        return "\n".join(cleaned_lines)
-
     def _maybe_generate_briefing(self):
         if (self._weather_data_for_briefing is None
                 or self._finance_data is None
@@ -1862,24 +1606,11 @@ class DailyDashboardWindow(QWidget):
             return
 
         self.ai_orb.set_status_text("Sistem Aktif")
-        briefing_text = self._strip_known_section_headers(briefing_text)
-
-        # Hava & Piyasa paragrafı LLM'den gelmiyor (bkz. _build_weather_finance_paragraph);
-        # LLM'in ürettiği ilk paragrafı (Giriş) hemen ardına ekleniyor.
-        paragraphs = [p.strip() for p in briefing_text.split("\n\n") if p.strip()]
-        weather_finance_paragraph = self._build_weather_finance_paragraph()
-        personal_reminders_paragraph = self._build_personal_reminders_paragraph()
-        insert_at = 1
-        if paragraphs and weather_finance_paragraph:
-            paragraphs.insert(insert_at, weather_finance_paragraph)
-            insert_at += 1
-        elif weather_finance_paragraph:
-            paragraphs.append(weather_finance_paragraph)
-        if paragraphs and personal_reminders_paragraph:
-            paragraphs.insert(insert_at, personal_reminders_paragraph)
-        elif personal_reminders_paragraph:
-            paragraphs.append(personal_reminders_paragraph)
-        briefing_text = "\n\n".join(paragraphs)
+        # Hava & Piyasa ve Kişisel Hatırlatmalar paragrafları LLM'den gelmiyor
+        # (bkz. briefing_text.py); LLM'in ürettiği metne doğru sırada eklenir.
+        briefing_text = briefing_text_module.assemble_final_briefing(
+            briefing_text, self._weather_data_for_briefing, self._finance_data,
+        )
 
         self.briefing_text_label.setText(briefing_text)
 
