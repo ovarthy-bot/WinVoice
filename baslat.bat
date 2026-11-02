@@ -37,14 +37,9 @@ if errorlevel 1 (
     exit /b 1
 )
 
+echo Eski WinVoice surecleri kontrol ediliyor...
+powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { ($_.Name -ieq 'pythonw.exe' -or $_.Name -ieq 'python.exe') -and ($_.ExecutablePath -like '*WinVoice*' -or $_.CommandLine -like '*WinVoice*') -and ($_.CommandLine -like '*main.py*') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+
 echo WinVoice baslatiliyor... ^(sag alt kosede kucuk bir pencere belirecek^)
-python main.py
-if errorlevel 1 (
-    echo [HATA] WinVoice bir hatayla kapandi. Yukaridaki mesaja bakin.
-    pause
-    exit /b 1
-)
-
-echo WinVoice kapatildi.
-pause
-
+start "" ".venv\Scripts\pythonw.exe" main.py
+exit /b 0

@@ -13,10 +13,12 @@ from PIL import Image, ImageFilter
 
 from PyQt5.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QFrame, QSizePolicy,
-    QApplication, QStackedWidget, QScrollArea, QRadioButton, QButtonGroup, QSlider
+    QApplication, QStackedWidget, QScrollArea, QRadioButton, QButtonGroup, QSlider,
+    QGraphicsDropShadowEffect, QPlainTextEdit, QLineEdit, QDialog, QFormLayout,
+    QMessageBox, QComboBox
 )
-from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QRectF
-from PyQt5.QtGui import QPainter, QPen, QColor, QPixmap
+from PyQt5.QtCore import Qt, QTimer, QThread, QObject, pyqtSignal, QRectF, QSize
+from PyQt5.QtGui import QPainter, QPen, QColor, QPixmap, QIcon
 
 from chat_ui import ChatPage
 from worker_threads import (
@@ -30,6 +32,11 @@ from llm_settings import AVAILABLE_LLM_MODELS, get_llm_model
 import briefing_data
 import briefing_text as briefing_text_module
 import tr_dates
+import telegram_settings
+import note_database
+import vault_cache
+import cloud_sync
+import cloud_sync_service
 
 # "Müzik Çal" hızlı işlem butonuyla açılan varsayılan müzik çalar
 ORCHARD_EXE_PATH = r"C:\Users\Onur\Documents\GitHub\orchard\build\dev\orchard.exe"
@@ -121,11 +128,54 @@ class IconBadge(QLabel):
         """)
 
 
+def _to_qcolor(color):
+    """color bir (r, g, b, a) demeti veya '#RRGGBB' gibi bir QColor dizgisi
+    olabilir. QColor'ın Python kurucusu CSS 'rgba(...)' söz dizimini kabul
+    ETMEZ (yalnızca Qt stylesheet'leri eder) — bu yüzden saydam/tonlu rozet
+    renkleri için demet kullanılması gerekir."""
+    if isinstance(color, (tuple, list)):
+        return QColor(*color)
+    return QColor(color)
+
+
+def render_icon_pixmap(glyph, bg_color="#2A2420", fg_color=ACCENT, size=28, font_size=14):
+    """IconBadge ile aynı görünümü (renkli, yuvarlak rozet) bir QPixmap olarak
+    çizer — QPushButton.setIcon() ile hızlı işlem butonlarının solunda sabit
+    bir marka/ikon rozeti göstermek için kullanılır."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(_to_qcolor(bg_color))
+    painter.drawEllipse(0, 0, size, size)
+    painter.setPen(_to_qcolor(fg_color))
+    font = painter.font()
+    font.setPointSize(font_size)
+    painter.setFont(font)
+    painter.drawText(pixmap.rect(), Qt.AlignCenter, glyph)
+    painter.end()
+    return pixmap
+
+
 class Divider(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedHeight(1)
         self.setStyleSheet("background-color: rgba(255, 255, 255, 25);")
+
+
+class LogRelay(QObject):
+    """main.py, baslat.bat'ın açtığı konsol penceresi yerine print() çıktılarını
+    bir sahte stdout'ta (bkz. main.py._StdoutRelay) toplar; bu sınıf o çıktıyı
+    GUI iş parçacığına güvenli şekilde taşır. emit_line() herhangi bir iş
+    parçacığından (ör. HotwordListener) çağrılabilir — Qt, verici ile alıcı
+    farklı iş parçacığında olduğunda sinyali otomatik olarak kuyruğa alıp ana
+    iş parçacığındaki slot'a (DailyDashboardWindow.append_log_line) teslim eder."""
+    line_received = pyqtSignal(str)
+
+    def emit_line(self, text):
+        self.line_received.emit(text)
 
 
 class AIOrbWidget(QWidget):
@@ -472,7 +522,7 @@ class DailyDashboardWindow(QWidget):
     def __init__(self, process_input_func=None, execute_powershell_func=None,
                  pause_hotword_func=None, resume_hotword_func=None,
                  generate_briefing_func=None, set_listening_muted_func=None,
-                 set_llm_model_func=None):
+                 set_llm_model_func=None, get_llm_func=None):
         super().__init__()
         self._process_input_func = process_input_func
         self._execute_powershell_func = execute_powershell_func
@@ -481,6 +531,11 @@ class DailyDashboardWindow(QWidget):
         self._generate_briefing_func = generate_briefing_func
         self._set_listening_muted_func = set_listening_muted_func
         self._set_llm_model_func = set_llm_model_func
+        # Not Yönetimi modülü (bkz. telegram_service.TelegramPollThread) için:
+        # main.py'deki `llm` global'i Ayarlar'dan model değiştirilince yeniden
+        # atanıyor, bu yüzden nesnenin kendisi değil GÜNCEL değeri döndüren
+        # bir fonksiyon referansı tutulur.
+        self._get_llm_func = get_llm_func or (lambda: None)
         self._listening_muted = False
 
         self.setWindowTitle("WinVoice - Günlük Dashboard")
@@ -522,9 +577,12 @@ class DailyDashboardWindow(QWidget):
             resume_hotword_func=self._resume_hotword_func,
         ))  # index 1
         self.content_stack.addWidget(self._build_settings_page())  # index 2
+        self.content_stack.addWidget(self._build_notes_page())  # index 3
         body.addWidget(self.content_stack, stretch=1)
 
         root_layout.addLayout(body, stretch=1)
+
+        self._start_note_management_services()
 
         # Not: Qt.FramelessWindowHint ile birlikte showMaximized() Windows'ta
         # pencereyi ekranın biraz dışına taşırıyor (bilinen bir Qt/Windows
@@ -573,9 +631,7 @@ class DailyDashboardWindow(QWidget):
         layout.setContentsMargins(16, 0, 10, 0)
         layout.setSpacing(10)
 
-        mic_label = QLabel("🎤")
-        mic_label.setStyleSheet("font-size: 16px;")
-        layout.addWidget(mic_label)
+        layout.addWidget(IconBadge("🎤", bg_color=ACCENT, fg_color="#FFFFFF", size=30, font_size=15, radius=9))
 
         brand_label = QLabel("WinVoice")
         brand_label.setStyleSheet("font-size: 15px; font-weight: 600; color: #F1F5F9;")
@@ -678,6 +734,13 @@ class DailyDashboardWindow(QWidget):
         else:
             # Fotoğraf bulunamazsa düz koyu renge geri düş.
             painter.fillRect(self.rect(), QColor("#0B0F19"))
+        # Qt aynı widget üzerinde aynı anda iki QPainter'a izin vermez;
+        # painter burada açıkça end() edilmezse (Python onu fonksiyon
+        # dönene kadar canlı tutar), super().paintEvent(event)'in kendi
+        # QPainter'ı açması bazı durumlarda sessizce başarısız olup alt
+        # widget'ların (ör. dinamik olarak eklenen kart satırları) ilk
+        # boyama turunu atlamasına yol açabiliyordu.
+        painter.end()
         super().paintEvent(event)
 
     # ------------------------------------------------------------------- #
@@ -695,6 +758,7 @@ class DailyDashboardWindow(QWidget):
         nav_items = [
             ("🏠", "Günlük Dashboard", "dashboard"),
             ("🎙️", "Sesli Asistan", "chat"),
+            ("🗒️", "Not Yönetimi", "notes"),
             ("⚙️", "Ayarlar", "settings"),
             ("ℹ️", "Hakkında", "about"),
         ]
@@ -725,6 +789,10 @@ class DailyDashboardWindow(QWidget):
         elif key == "chat":
             self.content_stack.setCurrentIndex(1)
             self._active_nav_key = "chat"
+        elif key == "notes":
+            self.content_stack.setCurrentIndex(3)
+            self._active_nav_key = "notes"
+            self._refresh_notes_list()
         elif key == "settings":
             self.content_stack.setCurrentIndex(2)
             self._active_nav_key = "settings"
@@ -742,6 +810,292 @@ class DailyDashboardWindow(QWidget):
         """
         for key, btn in self.nav_buttons.items():
             btn.setStyleSheet(active_style if key == self._active_nav_key else inactive_style)
+
+    # ------------------------------------------------------------------- #
+    # Not Yönetimi sayfası (Telegram Akıllı Not Yönetimi modülü)
+    # ------------------------------------------------------------------- #
+    _NOTES_CATEGORY_META = {
+        "all": ("Tümü", "🗂️"),
+        "appointment": ("Randevular", "📅"),
+        "shopping": ("Alışveriş", "🛒"),
+        "reminder": ("Hatırlatmalar", "⏰"),
+        "general": ("Genel", "📝"),
+    }
+
+    def _build_notes_page(self):
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(16)
+
+        header = QHBoxLayout()
+        badge = IconBadge("🗒️", bg_color=ACCENT_STRONG, fg_color="white", size=46, font_size=20, radius=12)
+        header.addWidget(badge)
+        title_box = QVBoxLayout()
+        title_box.setSpacing(2)
+        title = QLabel("Not Yönetimi")
+        title.setStyleSheet("font-size: 26px; font-weight: 700; color: #F8FAFC;")
+        subtitle = QLabel("Telegram'a yazdığın notlar otomatik sınıflandırılıp burada listelenir.")
+        subtitle.setStyleSheet("font-size: 13px; color: #8592A6;")
+        title_box.addWidget(title)
+        title_box.addWidget(subtitle)
+        header.addSpacing(12)
+        header.addLayout(title_box)
+        header.addStretch()
+        layout.addLayout(header)
+
+        # Kategori filtre çipleri
+        self._notes_active_category = "all"
+        self._notes_filter_buttons = {}
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(8)
+        for key, (label, icon) in self._NOTES_CATEGORY_META.items():
+            btn = QPushButton(f"{icon}  {label}")
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setFixedHeight(34)
+            btn.clicked.connect(lambda checked=False, k=key: self._on_notes_filter_clicked(k))
+            filter_row.addWidget(btn)
+            self._notes_filter_buttons[key] = btn
+        filter_row.addStretch()
+        layout.addLayout(filter_row)
+
+        # Arama + sıralama
+        search_row = QHBoxLayout()
+        search_row.setSpacing(8)
+        self._notes_search_box = QLineEdit()
+        self._notes_search_box.setPlaceholderText("Notlarda ara...")
+        self._notes_search_box.setStyleSheet("""
+            QLineEdit { background-color: rgba(255,255,255,12); color: #E8EAED;
+                        border: 1px solid rgba(255,255,255,20); border-radius: 10px;
+                        padding: 6px 12px; font-size: 13px; }
+            QLineEdit:focus { border: 1px solid %s; }
+        """ % ACCENT)
+        self._notes_search_box.textChanged.connect(lambda _text: self._refresh_notes_list())
+        search_row.addWidget(self._notes_search_box, stretch=1)
+
+        self._notes_sort_combo = QComboBox()
+        self._notes_sort_combo.addItem("Yeni → Eski", "date_desc")
+        self._notes_sort_combo.addItem("Eski → Yeni", "date_asc")
+        self._notes_sort_combo.setFixedWidth(140)
+        self._notes_sort_combo.setStyleSheet("""
+            QComboBox { background-color: rgba(255,255,255,12); color: #E8EAED;
+                        border: 1px solid rgba(255,255,255,20); border-radius: 10px;
+                        padding: 6px 10px; font-size: 13px; }
+        """)
+        self._notes_sort_combo.currentIndexChanged.connect(lambda _i: self._refresh_notes_list())
+        search_row.addWidget(self._notes_sort_combo)
+        layout.addLayout(search_row)
+
+        # Not listesi
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setStyleSheet("background: transparent; border: none;")
+        scroll.viewport().setStyleSheet("background: transparent;")
+
+        list_container = QWidget()
+        list_container.setStyleSheet("background: transparent;")
+        self.notes_list_layout = QVBoxLayout(list_container)
+        self.notes_list_layout.setSpacing(10)
+        self.notes_list_layout.setAlignment(Qt.AlignTop)
+        scroll.setWidget(list_container)
+        layout.addWidget(scroll, stretch=1)
+
+        self._refresh_notes_filter_styles()
+        return container
+
+    def _refresh_notes_filter_styles(self):
+        active_style = f"""
+            QPushButton {{ background-color: {ACCENT_STRONG}; color: white; border: none;
+                          border-radius: 10px; font-size: 12px; font-weight: 600; padding: 0 12px; }}
+        """
+        inactive_style = """
+            QPushButton { background-color: rgba(255,255,255,12); color: #94A3B8;
+                          border: 1px solid rgba(255,255,255,18); border-radius: 10px;
+                          font-size: 12px; padding: 0 12px; }
+            QPushButton:hover { background-color: rgba(255,255,255,22); color: #E5E7EB; }
+        """
+        for key, btn in self._notes_filter_buttons.items():
+            btn.setStyleSheet(active_style if key == self._notes_active_category else inactive_style)
+
+    def _on_notes_filter_clicked(self, category):
+        self._notes_active_category = category
+        self._refresh_notes_filter_styles()
+        self._refresh_notes_list()
+
+    def _refresh_notes_list(self):
+        """Veritabanını (bkz. note_database.get_notes) mevcut filtre/arama/
+        sıralama seçimlerine göre sorgulayıp listeyi yeniden çizer. Hem nav
+        tıklamasında hem de arka planda yeni bir not kaydedildiğinde (bkz.
+        _start_note_management_services) çağrılır."""
+        if not hasattr(self, "notes_list_layout"):
+            return
+        while self.notes_list_layout.count():
+            item = self.notes_list_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        category = getattr(self, "_notes_active_category", "all")
+        search = self._notes_search_box.text().strip() if hasattr(self, "_notes_search_box") else ""
+        sort = self._notes_sort_combo.currentData() if hasattr(self, "_notes_sort_combo") else "date_desc"
+
+        try:
+            notes = note_database.get_notes(category=category, search=search or None, sort=sort)
+        except Exception as e:
+            print(f"⚠️ Notlar yüklenemedi: {e}")
+            notes = []
+
+        if not notes:
+            empty_label = QLabel("Henüz not yok. Telegram'a bir mesaj yazarak başlayabilirsin.")
+            empty_label.setStyleSheet("color: #8592A6; font-size: 13px;")
+            empty_label.setAlignment(Qt.AlignCenter)
+            self.notes_list_layout.addWidget(empty_label)
+            return
+
+        for note in notes:
+            self.notes_list_layout.addWidget(self._build_note_row(note))
+
+    def _build_note_row(self, note):
+        label, icon = self._NOTES_CATEGORY_META.get(note["category"], ("Not", "📝"))
+        row = self._card_frame()
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(14, 10, 14, 10)
+        row_layout.setSpacing(10)
+
+        row_layout.addWidget(IconBadge(icon, bg_color="rgba(245, 158, 11, 35)",
+                                        fg_color=ACCENT, size=36, font_size=15, radius=10))
+
+        text_box = QVBoxLayout()
+        text_box.setSpacing(2)
+        title_text = note["title"]
+        if note.get("needs_review"):
+            title_text += "  ·  kontrol et"
+        title_lbl = QLabel(title_text)
+        title_lbl.setStyleSheet("font-size: 13px; font-weight: 600; color: #F1F5F9;")
+        if note.get("completed"):
+            title_lbl.setStyleSheet("font-size: 13px; font-weight: 600; color: #64748B; text-decoration: line-through;")
+        desc = (note.get("description") or "").strip()
+        meta_bits = [label]
+        for key in ("appt_date", "remind_at", "product_name"):
+            if note.get(key):
+                meta_bits.append(str(note[key]))
+        subtitle_lbl = QLabel(" · ".join(meta_bits) + (f"\n{desc}" if desc else ""))
+        subtitle_lbl.setStyleSheet("font-size: 11px; color: #8592A6;")
+        subtitle_lbl.setWordWrap(True)
+        text_box.addWidget(title_lbl)
+        text_box.addWidget(subtitle_lbl)
+        row_layout.addLayout(text_box, stretch=1)
+
+        toggle = ToggleSwitch(checked=bool(note.get("completed")))
+        toggle.toggled.connect(lambda checked, nid=note["id"]: self._on_note_completed_toggled(nid, checked))
+        row_layout.addWidget(toggle)
+
+        edit_btn = QPushButton("✏️")
+        edit_btn.setCursor(Qt.PointingHandCursor)
+        edit_btn.setFixedSize(30, 30)
+        edit_btn.setStyleSheet("QPushButton { background: transparent; border: none; font-size: 14px; } "
+                                "QPushButton:hover { background: rgba(255,255,255,20); border-radius: 6px; }")
+        edit_btn.clicked.connect(lambda checked=False, nid=note["id"]: self._on_note_edit_clicked(nid))
+        row_layout.addWidget(edit_btn)
+
+        delete_btn = QPushButton("🗑️")
+        delete_btn.setCursor(Qt.PointingHandCursor)
+        delete_btn.setFixedSize(30, 30)
+        delete_btn.setStyleSheet("QPushButton { background: transparent; border: none; font-size: 14px; } "
+                                  "QPushButton:hover { background: rgba(239,68,68,40); border-radius: 6px; }")
+        delete_btn.clicked.connect(lambda checked=False, nid=note["id"]: self._on_note_delete_clicked(nid))
+        row_layout.addWidget(delete_btn)
+
+        return row
+
+    def _on_note_completed_toggled(self, note_id, checked):
+        note_database.set_completed(note_id, checked)
+        self._refresh_notes_list()
+
+    def _on_note_delete_clicked(self, note_id):
+        reply = QMessageBox.question(
+            self, "Notu sil", "Bu notu silmek istediğine emin misin?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            note_database.delete_note(note_id)
+            self._refresh_notes_list()
+
+    def _on_note_edit_clicked(self, note_id):
+        note = note_database.get_note(note_id)
+        if not note:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Notu Düzenle")
+        dialog.setStyleSheet("QDialog { background-color: #15110C; } QLabel { color: #E5E7EB; }")
+        form = QFormLayout(dialog)
+
+        title_edit = QLineEdit(note["title"])
+        desc_edit = QLineEdit(note.get("description") or "")
+        category_combo = QComboBox()
+        for key in ("appointment", "shopping", "reminder", "general"):
+            category_combo.addItem(self._NOTES_CATEGORY_META[key][0], key)
+        current_index = category_combo.findData(note["category"])
+        if current_index >= 0:
+            category_combo.setCurrentIndex(current_index)
+
+        form.addRow("Başlık", title_edit)
+        form.addRow("Açıklama", desc_edit)
+        form.addRow("Kategori", category_combo)
+
+        buttons_row = QHBoxLayout()
+        save_btn = QPushButton("Kaydet")
+        cancel_btn = QPushButton("Vazgeç")
+        buttons_row.addWidget(save_btn)
+        buttons_row.addWidget(cancel_btn)
+        form.addRow(buttons_row)
+
+        def on_save():
+            note_database.update_note(note_id, fields={
+                "title": title_edit.text().strip() or note["title"],
+                "description": desc_edit.text().strip(),
+                "category": category_combo.currentData(),
+            })
+            dialog.accept()
+            self._refresh_notes_list()
+
+        save_btn.clicked.connect(on_save)
+        cancel_btn.clicked.connect(dialog.reject)
+        dialog.exec_()
+
+    def _start_note_management_services(self):
+        """Not yönetimi artık bulutta (Cloudflare Worker + Groq, bkz.
+        cloudflare-worker/README.md) çalışır: Telegram mesajları webhook ile
+        doğrudan oraya gider ve hatırlatmalar bir cron tetikleyiciyle oradan
+        gönderilir — PC açık/kapalı fark etmez. Burada SADECE PC açıkken
+        buluttaki yeni not/mesajları yerel notes.db'ye çeken senkronizasyon
+        başlatılır (bkz. cloud_sync.py). Eski yerel long-polling
+        (telegram_service.TelegramPollThread) ve hatırlatma döngüsü
+        (reminder_scheduler.ReminderSchedulerThread) kasıtlı olarak
+        BAŞLATILMIYOR — aynı bot için Telegram webhook ile long-polling
+        birlikte çalışamaz ve hatırlatmalar artık buluttan gönderiliyor,
+        ikisi birden çalışsa aynı not/hatırlatma iki kez işlenir."""
+        note_database.init_db()
+        vault_cache.init_db()
+
+        try:
+            cloud_sync.push_config()
+        except Exception as e:
+            print(f"⚠️ Bulut ayarları gönderilemedi: {e}")
+
+        # HAKKIMDA artık SADECE Cloudflare D1'de yönetildiği için (bkz.
+        # vault_knowledge.py / personal_context.py modül yorumları), sesli
+        # asistanın kullandığı yerel önbellek her açılışta D1 ile güncellenir.
+        try:
+            synced = cloud_sync.sync_vault_from_cloud()
+            if synced:
+                print(f"📚 Kasa önbelleği güncellendi: {synced} not.")
+        except Exception as e:
+            print(f"⚠️ Kasa önbelleği güncellenemedi: {e}")
+
+        self._cloud_sync_thread = cloud_sync_service.CloudSyncThread()
+        self._cloud_sync_thread.messageSynced.connect(self._refresh_notes_list)
+        self._cloud_sync_thread.start()
 
     # ------------------------------------------------------------------- #
     # Ayarlar sayfası (ör. TTS ses modeli seçimi)
@@ -1022,34 +1376,77 @@ class DailyDashboardWindow(QWidget):
 
         columns = QHBoxLayout()
         columns.setSpacing(18)
-        columns.addWidget(self._build_news_card(), stretch=20)
-        columns.addWidget(self._build_right_column(), stretch=12)
+        # Sağ sütun (Hava/Akıllı Ev/Hızlı İşlemler/Tahmin) metin kırpılmasın
+        # diye kendi içerik genişliğine (bkz. _build_right_column'daki
+        # setMinimumWidth) sabitlenir (stretch=0); fazla alan Günlük
+        # Brifing kartına (stretch=1) verilir.
+        columns.addWidget(self._build_news_card(), stretch=1)
+        columns.addWidget(self._build_right_column(), stretch=0)
         layout.addLayout(columns, stretch=1)
 
         return container
 
     def _build_right_column(self):
-        """Hava Durumu, Akıllı Ev Kontrolleri ve 7 Günlük Tahmin kartlarını
-        dikey olarak sıralar; üçü toplamda dar ekranlarda taşabileceği
-        için kaydırılabilir bir alan içine konur."""
+        """Sağ taraf iki alt sütuna ayrılır: solda Hava Durumu + Akıllı Ev
+        Kontrolleri, sağda Hızlı İşlemler + 7 Günlük Tahmin. Toplamda dar
+        ekranlarda taşabileceği için kaydırılabilir bir alan içine konur."""
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setStyleSheet("background: transparent; border: none;")
         scroll.viewport().setStyleSheet("background: transparent;")
 
         content = QWidget()
         content.setStyleSheet("background: transparent;")
-        content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout = QHBoxLayout(content)
+        # Sağda 18px boşluk: QScrollArea'ya stylesheet uygulanınca dikey
+        # kaydırma çubuğu (7 Günlük Tahmin uzunsa görünür) viewport'tan yer
+        # ayırmak yerine içeriğin üzerine biniyor — bu pay olmadan en
+        # sağdaki sıcaklık etiketleri çubuğun altında kalıp görünmez oluyordu.
+        content_layout.setContentsMargins(0, 0, 18, 0)
         content_layout.setSpacing(18)
 
-        content_layout.addWidget(self._build_weather_card())
-        content_layout.addWidget(self._build_smart_home_card())
-        content_layout.addWidget(self._build_forecast_card())
-        content_layout.addStretch()
+        # Her alt sütun kendi QWidget'ına sarmalanıp bir asgari genişlik
+        # veriliyor: aksi halde (yalnızca layout stretch oranlarıyla)
+        # pencere daraldığında buton/başlık metinleri kaydırma çubuğu
+        # göstermek yerine sessizce kırpılıyordu.
+        col_a = QWidget()
+        col_a_layout = QVBoxLayout(col_a)
+        col_a_layout.setContentsMargins(0, 0, 0, 0)
+        col_a_layout.setSpacing(18)
+        col_a_layout.addWidget(self._build_weather_card())
+        col_a_layout.addWidget(self._build_smart_home_card())
+        col_a_layout.addStretch()
+        # Hava Durumu kartının gerçek asgari genişliği (başlık + "İstanbul /
+        # Çatalca" + ikon/sıcaklık/istatistikler) ~260-270px; 280 güvenli pay
+        # bırakıyor ama eski 380'den çok daha dar — dar ekranlarda sağ
+        # sütunun ekrandan taşmasına neden oluyordu.
+        col_a.setMinimumWidth(280)
+
+        col_b = QWidget()
+        col_b_layout = QVBoxLayout(col_b)
+        col_b_layout.setContentsMargins(0, 0, 0, 0)
+        col_b_layout.setSpacing(18)
+        col_b_layout.addWidget(self._build_quick_actions_card())
+        col_b_layout.addWidget(self._build_forecast_card())
+        col_b_layout.addStretch()
+        # 7 Günlük Tahmin satırı (gün adı + ikon/açıklama + maks/min sıcaklık)
+        # en dar haliyle ~300px gerektiriyor (bkz. _build_forecast_row); 320
+        # güvenli pay bırakıyor ama eski 390'dan belirgin şekilde daha dar.
+        col_b.setMinimumWidth(320)
+
+        content_layout.addWidget(col_a, stretch=11)
+        content_layout.addWidget(col_b, stretch=9)
 
         scroll.setWidget(content)
+        # +16px: 7 Günlük Tahmin listesi dikey kaydırmaya ihtiyaç duyduğunda
+        # QScrollArea viewport'u kendi genişliğinden dikey kaydırma çubuğu
+        # kadar dar olur — bu pay eklenmezse en sağdaki sıcaklık etiketleri
+        # çubuğun altında kalıp görünmez olur.
+        scroll.setMinimumWidth(
+            col_a.minimumWidth() + col_b.minimumWidth() + content_layout.spacing() + 16
+        )
         return scroll
 
     def _on_play_music_clicked(self):
@@ -1072,9 +1469,15 @@ class DailyDashboardWindow(QWidget):
             except Exception:
                 pass
         if self._listening_muted:
-            self._listen_toggle_btn.setText("🔇  Dinlemeyi Başlat")
+            self._listen_toggle_btn.setText(" Dinlemeyi Başlat")
+            self._listen_toggle_btn.setIcon(QIcon(render_icon_pixmap(
+                "🔇", bg_color=(248, 113, 113, 110), fg_color="#FEF2F2"
+            )))
         else:
-            self._listen_toggle_btn.setText("🎤  Dinlemeyi Duraklat")
+            self._listen_toggle_btn.setText(" Dinlemeyi Duraklat")
+            self._listen_toggle_btn.setIcon(QIcon(render_icon_pixmap(
+                "🎤", bg_color=(52, 211, 153, 110), fg_color="#ECFDF5"
+            )))
 
     def _build_header(self):
         row = QHBoxLayout()
@@ -1165,37 +1568,117 @@ class DailyDashboardWindow(QWidget):
 
         layout.addSpacing(10)
 
-        # Hızlı işlem butonları (ör. Müzik Çal) burada çerçevenin sol üst
-        # köşesinden başlayarak dikey sırayla listeleniyor. İleride yeni
-        # butonlar eklemek için _add_quick_action_button() kullanılabilir.
-        quick_actions_container = QWidget()
-        self.quick_actions_layout = QVBoxLayout(quick_actions_container)
-        self.quick_actions_layout.setContentsMargins(0, 0, 0, 0)
-        self.quick_actions_layout.setSpacing(8)
-        self.quick_actions_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-
-        self._add_quick_action_button("🎵  Müzik Çal", self._on_play_music_clicked)
-        self._listen_toggle_btn = self._add_quick_action_button(
-            "🎤  Dinlemeyi Duraklat", self._on_toggle_listening_clicked
-        )
-
-        layout.addWidget(quick_actions_container, stretch=1)
+        # Sistem günlüğü: baslat.bat artık bir komut penceresi açmıyor — bunun
+        # yerine main.py'de print() çağrıları sahte bir stdout'ta (_StdoutRelay)
+        # toplanıp LogRelay ile buraya (append_log_line) akıtılıyor. Kartın alt
+        # kısmını kaplayan bu alan, eskiden konsolda görünen çıktıyı gösterir.
+        self.console_log = QPlainTextEdit()
+        self.console_log.setReadOnly(True)
+        self.console_log.setMaximumBlockCount(400)
+        self.console_log.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        self.console_log.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.console_log.setFrameShape(QFrame.NoFrame)
+        self.console_log.setStyleSheet("""
+            QPlainTextEdit {
+                background-color: rgba(3, 3, 3, 190);
+                color: #8B95A1;
+                border: 1px solid rgba(255, 255, 255, 14);
+                border-radius: 10px;
+                padding: 8px 10px;
+                font-family: 'Cascadia Mono', 'Consolas', monospace;
+                font-size: 10px;
+            }
+        """)
+        layout.addWidget(self.console_log, stretch=1)
 
         return card
 
-    def _add_quick_action_button(self, text, handler):
-        btn = QPushButton(text)
+    def append_log_line(self, text):
+        """LogRelay.line_received'a bağlanır (bkz. main.py) — her satırı sistem
+        günlüğü kutusuna ekler ve görünümü en alta kaydırır."""
+        console = getattr(self, "console_log", None)
+        if console is None or not text:
+            return
+        console.appendPlainText(text)
+        scrollbar = console.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def _add_quick_action_button(self, actions_layout, icon_glyph, text, handler,
+                                  icon_bg="#2A2420", icon_fg=ACCENT):
+        btn = QPushButton(f" {text}")
         btn.setCursor(Qt.PointingHandCursor)
-        btn.setFixedHeight(40)
-        btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        btn.setStyleSheet(f"""
-            QPushButton {{ background-color: rgba(30, 27, 23, 190); color: #E5E7EB; border-radius: 10px;
-                          padding: 0 16px; font-size: 13px; font-weight: 600; }}
-            QPushButton:hover {{ background-color: {ACCENT_STRONG}; }}
+        btn.setFixedHeight(46)
+        btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        btn.setIcon(QIcon(render_icon_pixmap(icon_glyph, bg_color=icon_bg, fg_color=icon_fg)))
+        btn.setIconSize(QSize(28, 28))
+        btn.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(255, 255, 255, 12);
+                color: #E8EAED;
+                border: 1px solid rgba(255, 255, 255, 20);
+                border-radius: 12px;
+                padding: 0 14px;
+                font-size: 13px;
+                font-weight: 600;
+                text-align: left;
+            }
+            QPushButton:hover {
+                background-color: rgba(245, 158, 11, 38);
+                border: 1px solid rgba(245, 158, 11, 110);
+                color: #FFFFFF;
+            }
+            QPushButton:pressed {
+                background-color: rgba(245, 158, 11, 60);
+            }
+            QPushButton:disabled {
+                background-color: rgba(255, 255, 255, 6);
+                border: 1px solid rgba(255, 255, 255, 10);
+                color: #64748B;
+            }
         """)
+        shadow = QGraphicsDropShadowEffect(btn)
+        shadow.setBlurRadius(18)
+        shadow.setOffset(0, 3)
+        shadow.setColor(QColor(0, 0, 0, 100))
+        btn.setGraphicsEffect(shadow)
         btn.clicked.connect(handler)
-        self.quick_actions_layout.addWidget(btn, alignment=Qt.AlignLeft)
+        actions_layout.addWidget(btn)
         return btn
+
+    # --- Kart: Hızlı İşlemler ----------------------------------------------------
+    def _build_quick_actions_card(self):
+        card = self._card_frame()
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(10)
+
+        header = QHBoxLayout()
+        header.addWidget(IconBadge("⚡", bg_color="transparent", fg_color=ACCENT, size=22, font_size=15))
+        header_label = QLabel("HIZLI İŞLEMLER")
+        header_label.setStyleSheet(
+            "font-size: 11px; font-weight: 700; color: #7C8696; letter-spacing: 1px;"
+        )
+        header.addSpacing(6)
+        header.addWidget(header_label)
+        header.addStretch()
+        layout.addLayout(header)
+        layout.addSpacing(4)
+
+        actions_layout = QVBoxLayout()
+        actions_layout.setSpacing(10)
+        actions_layout.setAlignment(Qt.AlignTop)
+
+        self._add_quick_action_button(
+            actions_layout, "🎵", "Müzik Çal", self._on_play_music_clicked,
+            icon_bg=(167, 139, 250, 110), icon_fg="#EDE9FE",
+        )
+        self._listen_toggle_btn = self._add_quick_action_button(
+            actions_layout, "🎤", "Dinlemeyi Duraklat", self._on_toggle_listening_clicked,
+            icon_bg=(52, 211, 153, 110), icon_fg="#ECFDF5",
+        )
+        layout.addLayout(actions_layout)
+
+        return card
 
     # --- Kart 2: Günlük Brifing --------------------------------------------------
     def _build_news_card(self):
@@ -1204,6 +1687,10 @@ class DailyDashboardWindow(QWidget):
         outer.setContentsMargins(22, 20, 22, 20)
         outer.setSpacing(12)
 
+        # Başlık ve Duraklat/Durdur butonları artık AYRI satırlarda: aynı
+        # satırda sıkıştırılmaları, Günlük Brifing kartının asgari genişliğini
+        # gereksiz yere ~180px artırıp dar pencerelerde sağ sütunun (Hızlı
+        # İşlemler / 7 Günlük Tahmin) ekrandan taşmasına yol açıyordu.
         header = QHBoxLayout()
         header.addWidget(IconBadge("📰", bg_color="transparent", fg_color=ACCENT, size=28, font_size=18))
         header_label = QLabel("Günlük Brifing")
@@ -1211,28 +1698,30 @@ class DailyDashboardWindow(QWidget):
         header.addSpacing(6)
         header.addWidget(header_label)
         header.addStretch()
+        outer.addLayout(header)
 
         briefing_control_btn_style = """
             QPushButton { background-color: #1E293B; color: #E5E7EB; border-radius: 8px;
-                          padding: 6px 12px; font-size: 13px; }
+                          padding: 5px 10px; font-size: 12px; }
             QPushButton:hover { background-color: #334155; }
             QPushButton:disabled { background-color: #161C28; color: #475569; }
         """
+        controls_row = QHBoxLayout()
+        controls_row.addStretch()
         self.briefing_pause_btn = QPushButton("⏸ Duraklat")
         self.briefing_pause_btn.setCursor(Qt.PointingHandCursor)
         self.briefing_pause_btn.setStyleSheet(briefing_control_btn_style)
         self.briefing_pause_btn.setEnabled(False)
         self.briefing_pause_btn.clicked.connect(self._on_briefing_pause_clicked)
-        header.addWidget(self.briefing_pause_btn)
+        controls_row.addWidget(self.briefing_pause_btn)
 
         self.briefing_stop_btn = QPushButton("⏹ Durdur")
         self.briefing_stop_btn.setCursor(Qt.PointingHandCursor)
         self.briefing_stop_btn.setStyleSheet(briefing_control_btn_style)
         self.briefing_stop_btn.setEnabled(False)
         self.briefing_stop_btn.clicked.connect(self._on_briefing_stop_clicked)
-        header.addWidget(self.briefing_stop_btn)
-
-        outer.addLayout(header)
+        controls_row.addWidget(self.briefing_stop_btn)
+        outer.addLayout(controls_row)
         self._briefing_is_paused = False
 
         # AI çekirdeği grafiği: yükleniyor/hazır/hata durumunu ortasındaki
@@ -1482,7 +1971,7 @@ class DailyDashboardWindow(QWidget):
         day_box.addWidget(date_label)
         day_box_widget = QWidget()
         day_box_widget.setLayout(day_box)
-        day_box_widget.setFixedWidth(110)
+        day_box_widget.setFixedWidth(92)
         row_layout.addWidget(day_box_widget)
 
         desc, emoji = WEATHER_CODES.get(day["code"], ("Bilinmiyor", "❓"))
@@ -1492,21 +1981,28 @@ class DailyDashboardWindow(QWidget):
         mid_box.addWidget(icon_label)
         desc_label = QLabel(desc)
         desc_label.setStyleSheet("font-size: 12px; color: #CBD5E1;")
+        # "Gök gürültülü fırtına" gibi uzun açıklamalar, Hızlı İşlemler kartıyla
+        # paylaşılan dar sütunda satırı genişletip yatay kaydırma çubuğuna yol
+        # açmasın diye sarmalanıyor (sabit genişlikte tutulmuyor).
+        desc_label.setWordWrap(True)
         mid_box.addWidget(desc_label)
         mid_box.addStretch()
         row_layout.addLayout(mid_box, stretch=1)
 
-        tmax_label = QLabel(f"{round(day['tmax'])}°")
-        tmax_label.setStyleSheet("font-size: 13px; font-weight: 700; color: #FBBF24;")
-        tmax_label.setFixedWidth(34)
-        tmax_label.setAlignment(Qt.AlignRight)
-        row_layout.addWidget(tmax_label)
-
-        tmin_label = QLabel(f"{round(day['tmin'])}°")
-        tmin_label.setStyleSheet("font-size: 13px; font-weight: 700; color: #60A5FA;")
-        tmin_label.setFixedWidth(34)
-        tmin_label.setAlignment(Qt.AlignRight)
-        row_layout.addWidget(tmin_label)
+        # Maks/min tek bir QLabel'de (iki ayrı dar widget yerine) zengin
+        # metinle gösteriliyor: sağ sütuna bu kart kapandıktan uzun süre
+        # sonra (hava durumu API'si tamamlandığında) dinamik olarak eklenen
+        # iki ayrı dar/sabit genişlikli kardeş widget, bazı Windows/Qt
+        # kurulumlarında geometrisi/visible=True durumu doğru olsa bile
+        # ekrana hiç boyanmıyordu; tek widget'a indirmek bunu bypass ediyor.
+        temp_label = QLabel(
+            f'<span style="color:#FBBF24;">{round(day["tmax"])}°</span> '
+            f'<span style="color:#60A5FA;">{round(day["tmin"])}°</span>'
+        )
+        temp_label.setStyleSheet("font-size: 13px; font-weight: 700;")
+        temp_label.setFixedWidth(60)
+        temp_label.setAlignment(Qt.AlignRight)
+        row_layout.addWidget(temp_label)
 
         return row
 
@@ -1541,7 +2037,12 @@ class DailyDashboardWindow(QWidget):
             pass
 
         for day in result["days"]:
-            self.forecast_list_layout.addWidget(self._build_forecast_row(day))
+            row = self._build_forecast_row(day)
+            self.forecast_list_layout.addWidget(row)
+
+        # Satırlar, pencere zaten gösterildikten çok sonra (hava durumu API
+        # yanıtı gelince) dinamik olarak ekleniyor; yeniden boyama tetikler.
+        self.update()
 
         today_forecast = result["days"][0] if result["days"] else {}
         self._weather_data_for_briefing = {
@@ -1658,3 +2159,11 @@ class DailyDashboardWindow(QWidget):
 
     def _on_briefing_speaking_finished(self):
         self._set_briefing_controls_enabled(False)
+
+    def closeEvent(self, event):
+        # Dashboard kapanınca sesli brifing de durmalı; aksi halde pencere
+        # gizlenmiş olsa bile TTS arka planda okumaya devam eder.
+        thread = self._briefing_reader_thread
+        if thread and thread.isRunning():
+            thread.request_stop()
+        super().closeEvent(event)

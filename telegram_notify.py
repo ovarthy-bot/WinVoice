@@ -7,6 +7,7 @@
 import json
 import urllib.request
 import urllib.error
+import urllib.parse
 
 TELEGRAM_API_BASE = "https://api.telegram.org"
 
@@ -67,10 +68,29 @@ def send_message(bot_token, chat_id, text, timeout=15):
             raise TelegramError(f"Telegram API 'ok=false' döndürdü: {result}")
 
 
-def get_updates(bot_token, timeout=15):
-    """Bota gönderilmiş son güncellemeleri döner — chat_id'yi keşfetmek
-    için kullanılır (bkz. README: Telegram kurulumu)."""
+def get_updates(bot_token, offset=None, timeout=15, poll_timeout=None):
+    """Bota gönderilmiş güncellemeleri döner. `offset` verilirse, Telegram
+    yalnızca o update_id'den itibaren olanları döner VE önceki güncellemeleri
+    kendi tarafında 'okundu' işaretler (bkz. telegram_inbox.py — aynı mesajın
+    tekrar tekrar işlenmesini önlemek için kullanılır). `offset` verilmezse
+    (ör. ilk kurulum/chat_id keşfi) son 24 saatteki tüm güncellemeler döner.
+
+    `poll_timeout` verilirse Telegram'ın KENDİ uzun-yoklama (long polling)
+    mekanizması devreye girer: istek, o saniye kadar (en fazla ~50s) yeni bir
+    güncelleme gelene dek sunucu tarafında açık tutulur (bkz.
+    telegram_service.TelegramPollThread) — her birkaç saniyede bir boş
+    sorgu atmak yerine, tek bir bağlantı üzerinden verimli şekilde beklenir.
+    Bu durumda HTTP soket zaman aşımı (`timeout`), uzun-yoklama süresinden
+    büyük tutulmalı ki sunucu henüz cevap vermeden istemci taraf kesmesin."""
     url = f"{TELEGRAM_API_BASE}/bot{bot_token}/getUpdates"
+    params = {}
+    if offset is not None:
+        params["offset"] = offset
+    if poll_timeout is not None:
+        params["timeout"] = poll_timeout
+        timeout = max(timeout, poll_timeout + 10)
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, method="GET")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as response:

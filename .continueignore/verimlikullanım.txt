@@ -1,0 +1,11 @@
+Büyük projelerde kod tabanı taraması yaparken modellerin bağlam penceresi (context window) sınırlarına takılmamak ve doğru yanıtlar alabilmek için şu stratejileri uygulayabilirsiniz:
+
+@codebase Yerine Hedefli Bağlamlar Kullanın: Tüm projeyi taratmak yerine, yalnızca ilgilendiğiniz modülleri bağlama ekleyin. Örneğin tek bir dosya için @main.py, belirli bir klasör veya bileşen için @Folder veya terminal hataları için @terminal komutlarını tercih edin.
+
+Sorgularınızı Spesifik Hale Getirin: "Bu projeyi açıkla" gibi geniş sorular yerine "Veritabanı bağlantı fonksiyonu main.py içinde nasıl çağrılıyor?" gibi spesifik sorular sorun. Vektör arama (nomic-embed-text) bu sayede sadece en alakalı kod parçacıklarını seçecektir.
+
+Gereksiz Dosyaları .continueignore ile Hariç Tutun: Büyük log dosyaları, derlenmiş çıktılar (build/, dist/), test veri setleri veya görseller gibi doğrudan kod mantığıyla ilgili olmayan klasörleri projenizin ana dizinindeki .continueignore dosyasına ekleyerek indeksleme dışında bırakın.
+
+Sohbet Geçmişini Temiz tutun: Uzun süren sohbetlerde eski mesajlar da bağlam penceresini doldurur. Yeni bir özelliğe başlarken veya farklı bir soruya geçerken Continue arayüzünün üst kısmındaki "+" (New Session) simgesine tıklayarak sohbet penceresini sıfırlayın.
+
+Pencere Boyutunu Yapılandırın: Yerel Qwen2.5-Coder modelinizin desteklediği yüksek bağlam boyutundan yararlanmak için config.yaml içindeki model tanımlamanıza contextLength: 16384 veya 32768 parametresini ekleyerek modelin aynı anda daha fazla kod parçası işlemesini sağlayabilirsiniz.

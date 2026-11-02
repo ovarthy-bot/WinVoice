@@ -59,3 +59,10 @@ credentials.json # Ou qualquer arquivo JSON com credenciais
 
 # Kullanıcıya özel uygulama ayarları (ör. Dashboard > Ayarlar'dan seçilen TTS sesi)
 settings.json
+
+# Not Yönetimi modülünün SQLite veritabanı (bkz. note_database.py)
+notes.db
+.aider*
+
+# Wrangler lokal durumu (D1 yerel kopyası, hesap önbelleği)
+.wrangler/

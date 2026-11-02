@@ -1,0 +1,24 @@
+name = "winvoice-telegram-notes"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+
+# `wrangler d1 create winvoice-notes` çalıştırdıktan sonra çıkan database_id'yi
+# buraya yapıştırın (bkz. README.md "Kurulum" bölümü, adım 2).
+[[d1_databases]]
+binding = "DB"
+database_name = "winvoice-notes"
+database_id = "fe50a71d-f076-495f-81cc-86e00fed677c"
+
+# İki cron: her dakika hatırlatma kontrolü (note_database.get_due_reminders'ın
+# bulut karşılığı) ve her gün 02:00 UTC = 05:00 İstanbul'da günlük brifing
+# (telegram_briefing.py'nin bulut karşılığı, bkz. src/briefing.js). Türkiye
+# yaz saati uygulamadan sabit UTC+3 kullandığı için offset sabit.
+[triggers]
+crons = ["* * * * *", "0 2 * * *"]
+
+# Gizli olmayan ayarlar (API key/token DEĞİL — onlar `wrangler secret put` ile
+# eklenir, bkz. README.md). Buraya yazılanlar worker koduna düz metin olarak
+# gömülür ve git'e commitlenir, o yüzden burada SADECE model adı gibi genel
+# ayarlar durur.
+[vars]
+GROQ_MODEL = "openai/gpt-oss-120b"

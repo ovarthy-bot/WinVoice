@@ -58,6 +58,49 @@ def finance_phrases(finance_data):
     return phrases
 
 
+def _top_clothing(low, high):
+    if low < 5:
+        return "üstüne kalın bir mont ya da kaban, altına kazak"
+    if high < 15:
+        return "üstüne mont ya da kalın bir ceket, altına sweatshirt"
+    if high < 22:
+        return "üstüne ince bir ceket ya da uzun kollu gömlek"
+    return "tişört ya da hafif bir gömlek"
+
+
+def _bottom_clothing(high):
+    if high >= 27:
+        return "kısa pantolon ya da ince chino"
+    return "uzun pantolon, chino ya da kot"
+
+
+def build_outfit_sentence(weather_data):
+    """Hava verisine göre erkek kullanıcı için 'bugün ne giysem' önerisini
+    deterministik olarak kurar (kadın kıyafeti önerilmez). Sıcaklık yoksa
+    boş string döner."""
+    w = weather_data or {}
+    high = w.get("bugun_max_c") if w.get("bugun_max_c") is not None else w.get("sicaklik_c")
+    low = w.get("bugun_min_c") if w.get("bugun_min_c") is not None else w.get("sicaklik_c")
+    if high is None or low is None:
+        return ""
+
+    description = (w.get("aciklama") or "").lower()
+    wind = w.get("ruzgar_kmh") or 0
+
+    items = [_top_clothing(low, high), _bottom_clothing(high)]
+    if high - low >= 10:
+        items.append("gün içinde hava çok değişecek, katmanlı giyin")
+    if any(word in description for word in ("yağmur", "çisenti", "sağanak", "fırtına", "dolu")):
+        items.append("yanına yağmurluk ya da su geçirmez bir mont al")
+    elif "kar" in description:
+        items.append("su geçirmez bot ve eldiven tercih et")
+    if wind >= 30:
+        items.append("rüzgar sert, rüzgarlık da işine yarar")
+    if high >= 22 and ("açık" in description or "az bulutlu" in description):
+        items.append("güneş gözlüğü de al")
+    return "Bugün ne giysen; " + "; ".join(items) + "."
+
+
 def build_weather_finance_paragraph(weather_data, finance_data):
     """Hava & Piyasa paragrafını LLM'e hiç yazdırmadan, tamamen deterministik
     olarak kurar. Testlerde küçük yerel modelin (gemma3:4b) hazır Türkçe
@@ -78,6 +121,10 @@ def build_weather_finance_paragraph(weather_data, finance_data):
         if w.get("ruzgar_hizi"):
             weather_sentence += f", rüzgar hızı {w['ruzgar_hizi']}"
         sentences.append(weather_sentence + ".")
+
+    outfit_sentence = build_outfit_sentence(weather_data)
+    if outfit_sentence:
+        sentences.append(outfit_sentence)
 
     finance_bits = []
     if f.get("dolar_tl_satis_kuru"):

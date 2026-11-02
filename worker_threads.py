@@ -13,6 +13,7 @@ print("✅ Yerel konuşma tanıma modeli hazır.")
 
 from PyQt5.QtCore import QThread, pyqtSignal
 import speech_recognition as sr
+import re
 import threading
 import time
 import os
@@ -23,6 +24,17 @@ from tts_engine import (
     speak_text, speak_text_interruptible, list_turkish_voices,
     get_selected_voice_id, set_selected_voice_id, get_setting, set_setting,
 )
+from vault_knowledge import tr_lower
+
+MIN_ENERGY_THRESHOLD = 150
+MAX_ENERGY_THRESHOLD = 1000
+
+
+def _clamp_recognizer_threshold(recognizer: sr.Recognizer) -> None:
+    if recognizer.energy_threshold < MIN_ENERGY_THRESHOLD:
+        recognizer.energy_threshold = MIN_ENERGY_THRESHOLD
+    elif recognizer.energy_threshold > MAX_ENERGY_THRESHOLD:
+        recognizer.energy_threshold = MAX_ENERGY_THRESHOLD
 
 
 class LocalSpeechUnderstoodError(Exception):
@@ -42,12 +54,13 @@ def transcribe_audio(audio: sr.AudioData, language: str = "tr") -> str:
         # vad_filter: sessizlik/gürültü klipleri Whisper'a hiç gitmeden elenir.
         # Bu olmadan Whisper, ses içermeyen kliplerde bile YouTube altyazısı
         # tarzı rastgele cümleler ("abone olmayı unutmayın" vb.) halüsinasyon
-        # olarak üretebiliyor.
+        # olarak üretebiliyor. threshold=0.35 ile alçak sesli tek kelimelik
+        # "bilgisayar" / "evet" komutlarının yutulması engellenir.
         segments, _info = _whisper_model.transcribe(
             tmp_path,
             language=language,
             vad_filter=True,
-            vad_parameters=dict(min_silence_duration_ms=500),
+            vad_parameters=dict(min_silence_duration_ms=400, threshold=0.35),
         )
         text = "".join(segment.text for segment in segments).strip()
 
@@ -65,8 +78,12 @@ class HotwordListener(QThread):
 
     def __init__(self, hotword="bilgisayar"):
         super().__init__()
-        self.hotword = hotword.lower()
+        self.hotword = tr_lower(hotword).strip()
+        self._hotword_compact = re.sub(r"\W+", "", self.hotword)
         self.recognizer = sr.Recognizer()
+        self.recognizer.dynamic_energy_threshold = True
+        self.recognizer.energy_threshold = 300
+        self.recognizer.pause_threshold = 0.7
         try:
             default_mic_name = sr.Microphone.list_microphone_names()[sr.Microphone().device_index or 0]
         except Exception:
@@ -74,6 +91,7 @@ class HotwordListener(QThread):
         print(f"🎙️ Kullanılan mikrofon: {default_mic_name}")
         print(f"🎙️ Tüm mikrofonlar: {sr.Microphone.list_microphone_names()}")
         self.mic = sr.Microphone()
+        self._calibrated = False
         self._running = True
         self.paused = False
         # Dashboard'daki "Dinlemeyi Duraklat" düğmesiyle verilen KALICI
@@ -123,13 +141,16 @@ class HotwordListener(QThread):
         while self._running:
             if self.paused:
                 self._mic_idle_event.set()
-                time.sleep(0.3)
+                time.sleep(0.25)
                 continue
             self._mic_idle_event.clear()
             try:
                 try:
                     with self.mic as source:
-                        self.recognizer.adjust_for_ambient_noise(source, duration=0.3)
+                        if not self._calibrated:
+                            self.recognizer.adjust_for_ambient_noise(source, duration=0.8)
+                            self._calibrated = True
+                        _clamp_recognizer_threshold(self.recognizer)
                         if self.paused:
                             continue
                         print(f"👂 Dinleniyor... (enerji eşiği: {self.recognizer.energy_threshold:.0f})")
@@ -139,22 +160,28 @@ class HotwordListener(QThread):
                 if self.paused:
                     continue
                 print("🧠 Sözleriniz yerel olarak işleniyor (faster-whisper)...")
-                frase = transcribe_audio(audio).lower()
+                frase = tr_lower(transcribe_audio(audio)).strip()
+                frase_compact = re.sub(r"\W+", "", frase)
                 print(f"🗣️ Hotword Kontrol: {frase}")
-                if self.hotword in frase:
+                if self.hotword in frase or (self._hotword_compact and self._hotword_compact in frase_compact):
                     self.hotwordDetected.emit(self.hotword)
                     self.statusUpdate.emit("Dinleniyor...")
                     time.sleep(0.3)
             except sr.WaitTimeoutError:
-                print("⏱️ Zaman aşımı: 4 saniyede ses algılanmadı.")
+                _clamp_recognizer_threshold(self.recognizer)
                 continue
             except LocalSpeechUnderstoodError:
                 print("🤷 Ses yakalandı ama çözümlenemedi (anlaşılmadı).")
                 continue
             except Exception as e:
-                print(f"❌ Mikrofon hatası: {e}")
-                self.statusUpdate.emit(f"Mikrofon hatası: {e}")
-                time.sleep(1)
+                print(f"❌ Mikrofon hatası (yeniden başlatılıyor): {e}")
+                self.statusUpdate.emit(f"Mikrofon yeniden bağlanıyor...")
+                try:
+                    self.mic = sr.Microphone()
+                    self._calibrated = False
+                except Exception:
+                    pass
+                time.sleep(1.5)
 
     def stop(self):
         self._running = False
@@ -175,94 +202,119 @@ class AssistantWorker(QThread):
         self.processar_entrada = processar_entrada_func
         self.executar_comando_powershell = executar_powershell_func
         self.recognizer = sr.Recognizer()
+        self.recognizer.dynamic_energy_threshold = True
+        self.recognizer.energy_threshold = 300
+        self.recognizer.pause_threshold = 0.8
         self.mic = sr.Microphone()
 
     def run(self):
         # COM motorunu bu iş parçacığında (QThread) başlat
         pythoncom.CoInitialize()
+        try:
+            falar = speak_text
 
-        falar = speak_text
+            # Selamlama
+            self.chatResponse.emit("", "Sizi dinliyorum...")
+            falar("Sizi dinliyorum.")
+            time.sleep(0.2)
 
-        # Selamlama
-        self.chatResponse.emit("", "Sizi dinliyorum...")
-        falar("Sizi dinliyorum.")
-        time.sleep(0.3)
+            consecutive_silence = 0
+            stream_errors = 0
 
-        consecutive_silence = 0
-
-        while True:
-            try:
-                with self.mic as source:
-                    self.recognizer.adjust_for_ambient_noise(source, duration=0.3)
-                    self.chatResponse.emit("", "Dinleniyor...")
-                    audio = self.recognizer.listen(source, timeout=7, phrase_time_limit=12)
-
-                self.chatResponse.emit("", "Sözleriniz yerel olarak işleniyor (faster-whisper)...")
-                user_text = transcribe_audio(audio).lower().strip()
-                print(f"🗣️ Kullanıcı: {user_text}")
-                consecutive_silence = 0
-
-            except sr.WaitTimeoutError:
-                consecutive_silence += 1
-                if consecutive_silence >= 1:
-                    print("Zaman aşımı: Beklemeye dönülüyor.")
-                    break
-                continue
-            except LocalSpeechUnderstoodError:
-                self.chatResponse.emit("", "Sizi tam anlayamadım, tekrar eder misiniz?")
-                falar("Tam anlayamadım.")
-                time.sleep(0.3)
-                continue
-            except Exception as e:
-                print(f"Ses tanıma hatası: {e}")
-                break
-
-            # Çıkış ifadeleri
-            exit_phrases = ["çık", "çıkış", "kapat", "iptal", "vazgeç", "görüşürüz", "bay bay", "hoşça kal", "sus"]
-            if any(user_text == ep or user_text.startswith(ep + " ") for ep in exit_phrases):
-                self.chatResponse.emit(user_text, "Görüşmek üzere, iyi günler!")
-                falar("Görüşmek üzere.")
-                time.sleep(0.8)
-                break
-
-            # Girdiyi Analiz Et (KOMUT mu SOHBET mi?)
-            tipo, resposta = self.processar_entrada(user_text)
-
-            # --- SİSTEM KOMUTU ---
-            if tipo == "KOMUT":
-                comando_powershell = resposta
-                print(f"[+] Üretilen Komut: {comando_powershell}")
-                self.assistantResponse.emit("Bu komutu onaylıyor musunuz?", comando_powershell)
-                falar("Bu komutu çalıştırayım mı?")
-                time.sleep(0.3)
-
-                conf_text = ""
+            while True:
                 try:
                     with self.mic as source:
-                        self.recognizer.adjust_for_ambient_noise(source, duration=0.3)
-                        audio_conf = self.recognizer.listen(source, timeout=5, phrase_time_limit=4)
-                    conf_text = transcribe_audio(audio_conf).lower()
-                    print(f"🗣️ Onay: {conf_text}")
-                except Exception:
+                        _clamp_recognizer_threshold(self.recognizer)
+                        self.chatResponse.emit("", "Dinleniyor...")
+                        audio = self.recognizer.listen(source, timeout=7, phrase_time_limit=14)
+
+                    self.chatResponse.emit("", "Sözleriniz yerel olarak işleniyor (faster-whisper)...")
+                    raw_transcript = transcribe_audio(audio).strip()
+                    user_text = tr_lower(raw_transcript).strip()
+                    print(f"🗣️ Kullanıcı: {raw_transcript}")
+                    consecutive_silence = 0
+                    stream_errors = 0
+
+                except sr.WaitTimeoutError:
+                    consecutive_silence += 1
+                    if consecutive_silence >= 1:
+                        print("Zaman aşımı: Beklemeye dönülüyor.")
+                        break
+                    continue
+                except LocalSpeechUnderstoodError:
+                    self.chatResponse.emit("", "Sizi tam anlayamadım, tekrar eder misiniz?")
+                    falar("Tam anlayamadım.")
+                    time.sleep(0.2)
+                    continue
+                except Exception as e:
+                    print(f"Ses tanıma / mikrofon hatası: {e}")
+                    stream_errors += 1
+                    if stream_errors <= 1:
+                        try:
+                            self.mic = sr.Microphone()
+                            time.sleep(0.4)
+                            continue
+                        except Exception:
+                            pass
+                    break
+
+                # Çıkış ifadeleri (noktalama temizlenmiş metin üzerinden)
+                cleaned_exit = re.sub(r"[^\w\s]", "", user_text).strip()
+                exit_phrases = ["çık", "çıkış", "kapat", "iptal", "vazgeç", "görüşürüz", "bay bay", "hoşça kal", "sus"]
+                if any(cleaned_exit == ep or cleaned_exit.startswith(ep + " ") for ep in exit_phrases):
+                    self.chatResponse.emit(raw_transcript, "Görüşmek üzere, iyi günler!")
+                    falar("Görüşmek üzere.")
+                    time.sleep(0.6)
+                    break
+
+                # Girdiyi Analiz Et (KOMUT mu SOHBET mi?)
+                try:
+                    tipo, resposta = self.processar_entrada(raw_transcript)
+                except Exception as err:
+                    print(f"Yanıt üretim hatası: {err}")
+                    self.chatResponse.emit(raw_transcript, "Yanıt üretilirken bir hata oluştu, lütfen tekrar deneyin.")
+                    falar("Bir hata oluştu, lütfen tekrar deneyin.")
+                    continue
+
+                # --- SİSTEM KOMUTU ---
+                if tipo == "KOMUT":
+                    comando_powershell = resposta
+                    print(f"[+] Üretilen Komut: {comando_powershell}")
+                    self.assistantResponse.emit("Bu komutu onaylıyor musunuz?", comando_powershell)
+                    falar("Bu komutu çalıştırayım mı?")
+                    time.sleep(0.2)
+
                     conf_text = ""
+                    try:
+                        with self.mic as source:
+                            _clamp_recognizer_threshold(self.recognizer)
+                            audio_conf = self.recognizer.listen(source, timeout=5, phrase_time_limit=4)
+                        conf_text = tr_lower(transcribe_audio(audio_conf)).strip()
+                        print(f"🗣️ Onay: {conf_text}")
+                    except Exception:
+                        conf_text = ""
 
-                if any(k in conf_text for k in ["evet", "tamam", "olur", "çalıştır", "yap", "onayla", "ok", "yes", "başlat"]):
-                    self.assistantResponse.emit("Komut çalıştırılıyor...", comando_powershell)
-                    resultado = self.executar_comando_powershell(comando_powershell)
-                    falar("Komut çalıştırıldı.")
-                    self.assistantResult.emit("Komut çalıştırıldı!", resultado)
-                    time.sleep(2)
-                else:
-                    self.assistantResult.emit("İşlem iptal edildi.", "")
-                    falar("İşlem iptal edildi.")
-                    time.sleep(1)
-                break
+                    if any(k in conf_text for k in ["evet", "tamam", "olur", "çalıştır", "yap", "onayla", "ok", "yes", "başlat"]):
+                        self.assistantResponse.emit("Komut çalıştırılıyor...", comando_powershell)
+                        resultado = self.executar_comando_powershell(comando_powershell)
+                        falar("Komut çalıştırıldı.")
+                        self.assistantResult.emit("Komut çalıştırıldı!", resultado)
+                        time.sleep(2)
+                    else:
+                        self.assistantResult.emit("İşlem iptal edildi.", "")
+                        falar("İşlem iptal edildi.")
+                        time.sleep(1)
+                    break
 
-            # --- SOHBET / SORU ---
-            elif tipo == "SOHBET":
-                print(f"[+] Sohbet Cevabı: {resposta}")
-                self.chatResponse.emit(user_text, resposta)
-                falar(resposta)
-                time.sleep(0.4)
-
-        self.finished.emit()
+                # --- SOHBET / SORU ---
+                elif tipo == "SOHBET":
+                    print(f"[+] Sohbet Cevabı: {resposta}")
+                    self.chatResponse.emit(raw_transcript, resposta)
+                    falar(resposta)
+                    time.sleep(0.3)
+        finally:
+            self.finished.emit()
+            try:
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
