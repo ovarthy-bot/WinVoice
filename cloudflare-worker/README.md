@@ -116,6 +116,21 @@ düşmez).
   ```bash
   curl -X POST "https://<worker-url>/briefing/run" -H "Authorization: Bearer <SYNC_SECRET>"
   ```
+- **Önemli Etkinlikler** (`src/events.js`, yerel karşılığı `events_data.py`):
+  film/maç/fuar/fırlatma/indirim günü/astronomi gibi dış dünya etkinliklerini
+  ÖNCELİK PUANIYLA (High/Medium) etiketleyip sadece eşiği (varsayılan: sadece
+  High) geçenleri brifinge ekler — bilgi bombardımanı olmasın diye. Gerekli
+  (opsiyonel) secret'lar:
+  ```bash
+  npx wrangler secret put TMDB_API_KEY       # themoviedb.org'dan ücretsiz key
+  npx wrangler secret put FOOTBALL_API_KEY   # RapidAPI "API-Football" ücretsiz katman key'i
+  ```
+  Bu key'ler ayarlı değilse ilgili kaynaklar (film/futbol) sessizce boş döner,
+  diğer kaynaklar (fırlatma, Tüyap, indirim günleri, astronomi — hiçbiri key
+  gerektirmez) normal çalışır. Eşik, `briefing_events_min_priority` ayarı
+  (`telegram_settings.py` ↔ `app_config` D1 tablosu, persona yüzdeleriyle
+  aynı `POST /config` yoluyla PC açıldığında senkronize edilir) ile
+  `"high"`/`"medium"` arasında değiştirilebilir.
 
 Not: Dashboard'un kendi sesli (TTS) brifing kartı ve `telegram_briefing.py`
 betiği (manuel/Görev Zamanlayıcı ile çalıştırılabilir) hâlâ yerel Ollama

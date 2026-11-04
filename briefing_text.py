@@ -157,6 +157,16 @@ def build_personal_reminders_paragraph():
     return "Kişisel hatırlatmalara gelirsek; " + block
 
 
+def build_events_paragraph(events):
+    """events_data.get_prioritized_events()'in döndürdüğü, zaten eşiğe göre
+    filtrelenmiş ve tarihe göre sıralı listeyi hava/piyasa paragrafıyla aynı
+    mantıkla tamamen deterministik bir cümleye çevirir — LLM'e hiç gitmez."""
+    if not events:
+        return ""
+    bits = [e["title"] for e in events]
+    return "Öne çıkan etkinliklere gelirsek; " + ", ".join(bits) + "."
+
+
 def strip_known_section_headers(text):
     """LLM, talimata uymayıp ara sıra 'Türkiye Gündemi: ...' gibi bölüm
     başlıklarını (tek başına bir satır olarak ya da bir paragrafın başına
@@ -169,15 +179,17 @@ def strip_known_section_headers(text):
     return "\n".join(cleaned_lines)
 
 
-def assemble_final_briefing(llm_text, weather_data, finance_data):
+def assemble_final_briefing(llm_text, weather_data, finance_data, events=None):
     """LLM'in ürettiği Giriş/Türkiye/Dünya/Teknoloji/Kapanış metnine, LLM'e
-    hiç gösterilmeyen Hava & Piyasa ve Kişisel Hatırlatmalar paragraflarını
-    doğru sırada (Giriş'ten hemen sonra) ekleyip son brifing metnini döner."""
+    hiç gösterilmeyen Hava & Piyasa, Kişisel Hatırlatmalar ve Önemli
+    Etkinlikler paragraflarını doğru sırada (Giriş'ten hemen sonra) ekleyip
+    son brifing metnini döner."""
     text = strip_known_section_headers(llm_text)
     paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
 
     weather_finance_paragraph = build_weather_finance_paragraph(weather_data, finance_data)
     personal_reminders_paragraph = build_personal_reminders_paragraph()
+    events_paragraph = build_events_paragraph(events or [])
 
     insert_at = 1
     if paragraphs and weather_finance_paragraph:
@@ -188,7 +200,13 @@ def assemble_final_briefing(llm_text, weather_data, finance_data):
 
     if paragraphs and personal_reminders_paragraph:
         paragraphs.insert(insert_at, personal_reminders_paragraph)
+        insert_at += 1
     elif personal_reminders_paragraph:
         paragraphs.append(personal_reminders_paragraph)
+
+    if paragraphs and events_paragraph:
+        paragraphs.insert(insert_at, events_paragraph)
+    elif events_paragraph:
+        paragraphs.append(events_paragraph)
 
     return "\n\n".join(paragraphs)

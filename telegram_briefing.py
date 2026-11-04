@@ -23,6 +23,7 @@ from langchain_ollama.llms import OllamaLLM
 
 import briefing_data
 import briefing_text
+import events_data
 import telegram_notify
 import telegram_settings
 from llm_settings import get_llm_model
@@ -127,6 +128,16 @@ def build_briefing_text():
         log.warning("Haber akışı alınamadı: %s", e)
         news_items_text = "(Haber akışı alınamadı.)"
 
+    try:
+        events = events_data.get_prioritized_events(
+            min_priority=telegram_settings.get_briefing_events_min_priority(),
+            tmdb_api_key=telegram_settings.get_tmdb_api_key(),
+            football_api_key=telegram_settings.get_football_api_key(),
+        )
+    except Exception as e:
+        log.warning("Önemli etkinlikler alınamadı, brifing bu bölümsüz devam edecek: %s", e)
+        events = []
+
     _ensure_ollama_running()
     llm = OllamaLLM(model=get_llm_model())
     prompt_template = PromptTemplate.from_template(DAILY_BRIEFING_PROMPT)
@@ -137,7 +148,7 @@ def build_briefing_text():
     log.info("LLM (%s) ile brifing metni üretiliyor...", get_llm_model())
     llm_text = generate_daily_briefing(llm, prompt_template, LOCATION, time_str, news_items_text)
 
-    return briefing_text.assemble_final_briefing(llm_text, weather_data, finance_data)
+    return briefing_text.assemble_final_briefing(llm_text, weather_data, finance_data, events)
 
 
 def main():

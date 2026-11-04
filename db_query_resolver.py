@@ -163,15 +163,21 @@ def answer_db_query(user_text: str) -> str | None:
     # 1. Alışveriş listesi sorguları
     if any(p in q for p in _SHOPPING_PHRASES):
         items = _active_clean_notes(category="shopping")
-        subject_terms = _meaningful_terms(q) - _SHOPPING_GENERIC_STEMS
+        q_clean = re.sub(r"['’‘]\w+", "", q)
+        subject_terms = _meaningful_terms(q_clean) - _SHOPPING_GENERIC_STEMS
         if subject_terms:
-            matched = [
-                it for it in items
-                if subject_terms & _meaningful_terms(
+            scored = []
+            for it in items:
+                it_terms = _meaningful_terms(
                     f"{it.get('title', '')} {it.get('description', '')} {it.get('product_name', '')}"
                 )
-            ]
-            if matched:
+                overlap = subject_terms & it_terms
+                if overlap:
+                    if subject_terms.issubset(it_terms) or it_terms.issubset(subject_terms):
+                        scored.append((len(overlap), it))
+            if scored:
+                max_score = max(s for s, _ in scored)
+                matched = [it for s, it in scored if s == max_score]
                 detay = "; ".join(_format_shopping_item(it) for it in matched)
                 return f"Alışveriş listenizde bu konuyla ilgili şu kayıt var: {detay}"
             # Alışveriş tablosunda bu özel konu yoksa serbest metin notlarında

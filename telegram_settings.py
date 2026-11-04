@@ -25,6 +25,15 @@ CLOUD_SYNC_LAST_NOTE_ID_KEY = "cloud_sync_last_note_id"
 # olarak id değil zaman damgası, çünkü vault_notes'ta autoincrement id yok.
 CLOUD_SYNC_LAST_VAULT_SYNC_AT_KEY = "cloud_sync_last_vault_sync_at"
 
+# Günlük brifingin "Önemli Etkinlikler" bölümü (bkz. events_data.py) için
+# dış API anahtarları ve öncelik eşiği. Aynı anahtarlar buluta
+# `wrangler secret put TMDB_API_KEY` / `FOOTBALL_API_KEY` ile ayrıca
+# eklenir (bkz. cloudflare-worker/README.md) — iki taraf birbirinden
+# bağımsız ayarlanır.
+TMDB_API_KEY_KEY = "tmdb_api_key"
+FOOTBALL_API_KEY_KEY = "football_api_key"
+BRIEFING_EVENTS_MIN_PRIORITY_KEY = "briefing_events_min_priority"
+
 
 def get_telegram_bot_token():
     return get_setting(TELEGRAM_BOT_TOKEN_KEY, "")
@@ -68,6 +77,33 @@ def get_cloud_sync_secret():
 
 def set_cloud_sync_secret(secret):
     set_setting(CLOUD_SYNC_SECRET_KEY, secret.strip())
+
+
+def get_tmdb_api_key():
+    return get_setting(TMDB_API_KEY_KEY, "")
+
+
+def set_tmdb_api_key(key):
+    set_setting(TMDB_API_KEY_KEY, key.strip())
+
+
+def get_football_api_key():
+    return get_setting(FOOTBALL_API_KEY_KEY, "")
+
+
+def set_football_api_key(key):
+    set_setting(FOOTBALL_API_KEY_KEY, key.strip())
+
+
+def get_briefing_events_min_priority():
+    return get_setting(BRIEFING_EVENTS_MIN_PRIORITY_KEY, "high")
+
+
+def set_briefing_events_min_priority(level):
+    level = level.strip().lower()
+    if level not in ("high", "medium"):
+        raise ValueError("min_priority sadece 'high' veya 'medium' olabilir")
+    set_setting(BRIEFING_EVENTS_MIN_PRIORITY_KEY, level)
 
 
 def is_cloud_sync_configured():

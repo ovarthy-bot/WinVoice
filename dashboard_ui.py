@@ -31,6 +31,7 @@ from persona_settings import (
 from llm_settings import AVAILABLE_LLM_MODELS, get_llm_model
 import briefing_data
 import briefing_text as briefing_text_module
+import events_data
 import tr_dates
 import telegram_settings
 import note_database
@@ -307,6 +308,27 @@ class FinanceFetchThread(QThread):
 
     def run(self):
         self.financeReady.emit(briefing_data.fetch_finance())
+
+
+# --------------------------------------------------------------------------- #
+# Önemli etkinlikler (film/maç/fuar/fırlatma/indirim/astronomi) — bkz.
+# events_data.py. TMDb/API-Football anahtarları ayarlı değilse ilgili
+# kaynaklar sessizce boş döner, bölüm hiç görünmez.
+# --------------------------------------------------------------------------- #
+
+class EventsFetchThread(QThread):
+    eventsReady = pyqtSignal(list)
+
+    def run(self):
+        try:
+            events = events_data.get_prioritized_events(
+                min_priority=telegram_settings.get_briefing_events_min_priority(),
+                tmdb_api_key=telegram_settings.get_tmdb_api_key(),
+                football_api_key=telegram_settings.get_football_api_key(),
+            )
+        except Exception:
+            events = []
+        self.eventsReady.emit(events)
 
 
 # --------------------------------------------------------------------------- #
@@ -605,6 +627,7 @@ class DailyDashboardWindow(QWidget):
         self._weather_data_for_briefing = None
         self._finance_data = None
         self._news_items_text = None
+        self._events_data = None
         self._briefing_thread = None
         self._briefing_reader_thread = None
 
@@ -620,6 +643,10 @@ class DailyDashboardWindow(QWidget):
         self._news_thread = NewsFetchThread()
         self._news_thread.newsReady.connect(self._on_news_raw_ready)
         self._news_thread.start()
+
+        self._events_thread = EventsFetchThread()
+        self._events_thread.eventsReady.connect(self._on_events_ready)
+        self._events_thread.start()
 
     # ------------------------------------------------------------------- #
     # Üst başlık çubuğu (özel - pencere çerçevesi olmadığı için elle çizildi)
@@ -2079,13 +2106,18 @@ class DailyDashboardWindow(QWidget):
         self._news_items_text = news_items_text
         self._maybe_generate_briefing()
 
+    def _on_events_ready(self, events):
+        self._events_data = events
+        self._maybe_generate_briefing()
+
     # ------------------------------------------------------------------- #
     # Günlük sesli brifing (LLM ile üretilir, sonra TTS ile okunur)
     # ------------------------------------------------------------------- #
     def _maybe_generate_briefing(self):
         if (self._weather_data_for_briefing is None
                 or self._finance_data is None
-                or self._news_items_text is None):
+                or self._news_items_text is None
+                or self._events_data is None):
             return
         if not self._generate_briefing_func:
             self.news_loading_label.setText("Brifing oluşturulamadı (üretim fonksiyonu tanımlı değil).")
@@ -2115,10 +2147,11 @@ class DailyDashboardWindow(QWidget):
             return
 
         self.ai_orb.set_status_text("Sistem Aktif")
-        # Hava & Piyasa ve Kişisel Hatırlatmalar paragrafları LLM'den gelmiyor
-        # (bkz. briefing_text.py); LLM'in ürettiği metne doğru sırada eklenir.
+        # Hava & Piyasa, Kişisel Hatırlatmalar ve Önemli Etkinlikler
+        # paragrafları LLM'den gelmiyor (bkz. briefing_text.py); LLM'in
+        # ürettiği metne doğru sırada eklenir.
         briefing_text = briefing_text_module.assemble_final_briefing(
-            briefing_text, self._weather_data_for_briefing, self._finance_data,
+            briefing_text, self._weather_data_for_briefing, self._finance_data, self._events_data,
         )
 
         self.briefing_text_label.setText(briefing_text)

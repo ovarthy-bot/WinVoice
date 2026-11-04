@@ -138,6 +138,7 @@ def push_config():
     payload = {
         "persona_espri_pct": persona_settings.get_espri_pct(),
         "persona_arkadas_pct": persona_settings.get_arkadaslik_pct(),
+        "briefing_events_min_priority": telegram_settings.get_briefing_events_min_priority(),
     }
 
     worker_url = telegram_settings.get_cloud_worker_url()

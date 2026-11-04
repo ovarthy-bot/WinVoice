@@ -85,6 +85,8 @@ _CALENDAR_GENERIC_WORDS = {
     "kayıt", "kayıtlı", "liste", "listem", "listemde", "bekleyen", "aktif",
     "yapılacak", "yapılacaklar", "tamamlanmamış", "iş", "işler", "işlerim",
     "şey", "şeyler", "kaldı", "zaman", "zamandı",
+    "söyle", "söyler", "göster", "gösterir", "öğren", "öğrenmek", "bak", "bakar",
+    "bilgi", "bilgisi", "var", "yok", "gününü",
     *(tr_lower(m) for m in TR_AYLAR),
     *_WEEKDAY_NAME_TO_INDEX.keys(),
 }
@@ -541,17 +543,56 @@ def answer_calendar_query(user_text_lower, today=None):
         return None
 
     # Sorguda özel bir kişi/kurum/konu adı geçiyorsa ("Emin Akbulut'un doğum
-    # günü ne zaman?", "Tüyap randevum ne zaman?", "Şampuanlık hatırlatmam
-    # neydi?" gibi), genel 30 günlük listeyi dökmek yerine tüm gelecek
-    # ufukta bu konuyu ara; tarihsiz bir hatırlatmaysa None dön ki RAG bulsun.
-    subject_terms = _meaningful_terms(q) - _CALENDAR_GENERIC_STEMS
+    # günü ne zaman?", "Tüyap randevum ne zaman?", "Oğuz Korkmaz doğum günü"
+    # gibi), genel 30 günlük listeyi dökmek yerine tüm gelecek ufukta bu konuyu ara;
+    # tarihsiz bir hatırlatmaysa None dön ki RAG bulsun.
+    # Apostrof eki temizliği: "Oğuz Korkmaz'ın" -> "Oğuz Korkmaz"
+    q_clean = re.sub(r"['’‘]\w+", "", q)
+    subject_terms = _meaningful_terms(q_clean) - _CALENDAR_GENERIC_STEMS
     if subject_terms:
+        # Tür filtresi: sorguda açık bir kategori belirtilmişse sadece o türü eşle
+        istenen_tur = None
+        if "doğum" in q:
+            istenen_tur = "doğum"
+        elif "randevu" in q:
+            istenen_tur = "randevu"
+        elif any(k in q for k in ("öde", "fatura", "kredi", "taksit", "aidat")):
+            istenen_tur = "ödeme"
+
         tum_olaylar = get_upcoming(within_days=3650, today=bugun)
-        eslesenler = [
-            e for e in tum_olaylar
-            if subject_terms & (_meaningful_terms(e["kim"]) | _meaningful_terms(e["not"]))
-        ]
-        if eslesenler:
+        candidates = []
+        for e in tum_olaylar:
+            if istenen_tur:
+                tur_low = tr_lower(e["tur"])
+                if istenen_tur == "doğum" and "doğum" not in tur_low:
+                    continue
+                if istenen_tur == "randevu" and "randevu" not in tur_low:
+                    continue
+                if istenen_tur == "ödeme" and not any(k in tur_low for k in ("ödeme", "fatura", "kredi", "taksit", "aidat")):
+                    continue
+
+            kim_terms = _meaningful_terms(e["kim"])
+            not_terms = _meaningful_terms(e["not"])
+            all_terms = kim_terms | not_terms
+            overlap = subject_terms & all_terms
+            if not overlap:
+                continue
+
+            # Tam kapsama kontrolü:
+            # 1) Kullanıcının belirttiği tüm konu terimleri kayıtta var mı? (örn. 'Oğuz Korkmaz' -> 'İsa Oğuz Korkmaz')
+            # 2) Ya da kaydın kişi adı terimlerinin tümü sorguda var mı? (örn. kayıt 'Oğuz', sorgu 'Oğuz Korkmaz')
+            is_full_match = subject_terms.issubset(all_terms)
+            is_kim_subset = bool(kim_terms and kim_terms.issubset(subject_terms))
+
+            if is_full_match or is_kim_subset:
+                score = len(overlap)
+                if kim_terms & subject_terms:
+                    score += 1
+                candidates.append((score, e))
+
+        if candidates:
+            max_score = max(score for score, _ in candidates)
+            eslesenler = [e for score, e in candidates if score == max_score]
             return " ".join(_cumle(e, bugun=bugun) for e in eslesenler)
         return None
 

@@ -15,6 +15,7 @@
 // doğrudan okunur — WinVoice'tan ayrıca bir şey itilmesine gerek yok.
 
 import { getConfigValue, httpGetJson, httpGetText, sendTelegramMessage, setConfigValue, stripHtmlTags } from "./common.js";
+import { getPrioritizedEvents } from "./events.js";
 
 // --------------------------------------------------------------------------- //
 // briefing_data.py portu — hava/piyasa/haber ham veri kaynakları
@@ -543,6 +544,12 @@ function buildWeatherFinanceParagraph(weatherData, financeData) {
   return sentences.join(" ");
 }
 
+function buildEventsParagraph(events) {
+  if (!events || !events.length) return "";
+  const bits = events.map((e) => e.title);
+  return "Öne çıkan etkinliklere gelirsek; " + bits.join(", ") + ".";
+}
+
 function stripKnownSectionHeaders(text) {
   return text
     .split("\n")
@@ -550,12 +557,13 @@ function stripKnownSectionHeaders(text) {
     .join("\n");
 }
 
-function assembleFinalBriefing(llmText, weatherData, financeData, remindersMd, todayDate) {
+function assembleFinalBriefing(llmText, weatherData, financeData, remindersMd, todayDate, events) {
   const text = stripKnownSectionHeaders(llmText);
   const paragraphs = text.split("\n\n").map((p) => p.trim()).filter(Boolean);
 
   const weatherFinanceParagraph = buildWeatherFinanceParagraph(weatherData, financeData);
   const personalRemindersParagraph = remindersMd ? buildPersonalRemindersParagraph(remindersMd, todayDate) : "";
+  const eventsParagraph = buildEventsParagraph(events);
 
   let insertAt = 1;
   if (paragraphs.length && weatherFinanceParagraph) {
@@ -567,8 +575,15 @@ function assembleFinalBriefing(llmText, weatherData, financeData, remindersMd, t
 
   if (paragraphs.length && personalRemindersParagraph) {
     paragraphs.splice(insertAt, 0, personalRemindersParagraph);
+    insertAt += 1;
   } else if (personalRemindersParagraph) {
     paragraphs.push(personalRemindersParagraph);
+  }
+
+  if (paragraphs.length && eventsParagraph) {
+    paragraphs.splice(insertAt, 0, eventsParagraph);
+  } else if (eventsParagraph) {
+    paragraphs.push(eventsParagraph);
   }
 
   return paragraphs.join("\n\n");
@@ -718,6 +733,18 @@ export async function generateAndSendDailyBriefing(env) {
   const remindersMd = remindersRow?.content || "";
   const espriPct = parseInt(await getConfigValue(env.DB, "persona_espri_pct", "50"), 10);
   const arkadasPct = parseInt(await getConfigValue(env.DB, "persona_arkadas_pct", "50"), 10);
+  const eventsMinPriority = await getConfigValue(env.DB, "briefing_events_min_priority", "high");
+
+  let events = [];
+  try {
+    events = await getPrioritizedEvents({
+      minPriority: eventsMinPriority,
+      tmdbApiKey: env.TMDB_API_KEY,
+      footballApiKey: env.FOOTBALL_API_KEY,
+    });
+  } catch (e) {
+    console.error("Önemli etkinlikler alınamadı, brifing bu bölümsüz devam edecek:", e);
+  }
 
   const now = new Date(Date.now() + 3 * 60 * 60 * 1000); // Istanbul duvar saati (UTC+3)
   const todayParts = {
@@ -741,7 +768,7 @@ export async function generateAndSendDailyBriefing(env) {
 
   try {
     const llmText = await callGroqPlainText(env, prompt);
-    const finalText = assembleFinalBriefing(llmText, weatherData, financeData, remindersMd, todayDate);
+    const finalText = assembleFinalBriefing(llmText, weatherData, financeData, remindersMd, todayDate, events);
     await sendTelegramMessage(env, env.TELEGRAM_CHAT_ID, finalText);
   } catch (e) {
     console.error("Brifing üretilemedi:", e);
@@ -766,6 +793,9 @@ export async function handleConfigPost(request, env) {
   }
   if (body.persona_arkadas_pct !== undefined) {
     await setConfigValue(env.DB, "persona_arkadas_pct", String(body.persona_arkadas_pct));
+  }
+  if (body.briefing_events_min_priority !== undefined) {
+    await setConfigValue(env.DB, "briefing_events_min_priority", String(body.briefing_events_min_priority));
   }
 
   return new Response(JSON.stringify({ ok: true }), { headers: { "Content-Type": "application/json" } });
