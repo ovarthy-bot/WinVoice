@@ -587,8 +587,9 @@ async function handleSync(request, env) {
 }
 
 // --------------------------------------------------------------------------- //
-// HAKKIMDA (Obsidian kasası) notlarının birincil deposu D1'de — bkz.
-// schema.sql vault_notes, migrate_hakkimda_to_cloud.py, vault_cache.py.
+// HAKKIMDA (Obsidian kasası) notlarının bulut kopyası D1'de — bkz.
+// schema.sql vault_notes/vault_notes_deleted, vault_sync_bidi.py (yerel
+// tarafta çift yönlü senkronu yöneten modül), vault_cache.py (RAG önbelleği).
 // --------------------------------------------------------------------------- //
 
 async function handleVaultImport(request, env) {
@@ -611,9 +612,48 @@ async function handleVaultImport(request, env) {
       "folder = excluded.folder, updated_at = excluded.updated_at"
   );
   const batch = notes.map((n) => stmt.bind(n.path, n.title, n.content, n.folder, now));
+  // Upsert edilen her path için (varsa) eski silme kaydı temizlenir —
+  // "silinmiş ama sonra geri eklenmiş" durumunda /vault/sync'in deletes
+  // listesi bu path'i bir daha asla döndürmemeli (bkz. vault_notes_deleted
+  // yorumu, schema.sql).
+  const clearTombstoneStmt = env.DB.prepare("DELETE FROM vault_notes_deleted WHERE path = ?");
+  for (const n of notes) {
+    batch.push(clearTombstoneStmt.bind(n.path));
+  }
   if (batch.length) await env.DB.batch(batch);
 
-  return new Response(JSON.stringify({ ok: true, imported: batch.length }), {
+  return new Response(JSON.stringify({ ok: true, imported: notes.length }), {
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+async function handleVaultDelete(request, env) {
+  const auth = request.headers.get("Authorization") || "";
+  if (auth !== `Bearer ${env.SYNC_SECRET}`) {
+    return unauthorized();
+  }
+
+  const body = await request.json();
+  const paths = Array.isArray(body.paths) ? body.paths : [];
+  const now = nowIstanbulIso();
+
+  // Silme işlemi iki adımlı: satır vault_notes'tan silinir VE
+  // vault_notes_deleted'e bir "mezar taşı" eklenir — aksi halde GET
+  // /vault/sync?since=... bu path'in artık var olmadığını hiçbir zaman
+  // öğrenemez (silinen satırın kendisi bu bilgiyi taşımıyor).
+  const delStmt = env.DB.prepare("DELETE FROM vault_notes WHERE path = ?");
+  const tombStmt = env.DB.prepare(
+    "INSERT INTO vault_notes_deleted (path, deleted_at) VALUES (?, ?) " +
+      "ON CONFLICT(path) DO UPDATE SET deleted_at = excluded.deleted_at"
+  );
+  const batch = [];
+  for (const p of paths) {
+    batch.push(delStmt.bind(p));
+    batch.push(tombStmt.bind(p, now));
+  }
+  if (batch.length) await env.DB.batch(batch);
+
+  return new Response(JSON.stringify({ ok: true, deleted: paths.length }), {
     headers: { "Content-Type": "application/json" },
   });
 }
@@ -624,10 +664,30 @@ async function handleVaultSync(request, env) {
     return unauthorized();
   }
 
-  const notes = await env.DB.prepare("SELECT path, title, content, folder FROM vault_notes").all();
-  return new Response(JSON.stringify({ notes: notes.results }), {
-    headers: { "Content-Type": "application/json" },
-  });
+  // ?since=<ISO zaman damgası> — verilmezse tüm kasa döner (ilk senkron/
+  // vault_cache.py'nin tam yenileme ihtiyacı için geriye dönük uyumlu).
+  // /sync uç noktasındaki since_message_id/since_note_id ile aynı artımlı
+  // çekme deseni, burada sayaç yerine updated_at/deleted_at zaman damgası
+  // kullanılıyor (vault_notes'ta autoincrement id yok).
+  const since = new URL(request.url).searchParams.get("since") || "1970-01-01T00:00:00.000Z";
+  const notes = await env.DB.prepare(
+    "SELECT path, title, content, folder, updated_at FROM vault_notes WHERE updated_at > ? ORDER BY updated_at ASC"
+  )
+    .bind(since)
+    .all();
+  const deletes = await env.DB.prepare(
+    "SELECT path, deleted_at FROM vault_notes_deleted WHERE deleted_at > ? ORDER BY deleted_at ASC"
+  )
+    .bind(since)
+    .all();
+
+  return new Response(
+    JSON.stringify({
+      notes: notes.results,
+      deletes: deletes.results.map((d) => d.path),
+    }),
+    { headers: { "Content-Type": "application/json" } }
+  );
 }
 
 export default {
@@ -647,6 +707,9 @@ export default {
     }
     if (request.method === "GET" && url.pathname === "/vault/sync") {
       return handleVaultSync(request, env);
+    }
+    if (request.method === "POST" && url.pathname === "/vault/delete") {
+      return handleVaultDelete(request, env);
     }
     if (request.method === "POST" && url.pathname === "/telegram/setup-menu") {
       const auth = request.headers.get("Authorization") || "";

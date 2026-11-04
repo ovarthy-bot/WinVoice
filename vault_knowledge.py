@@ -8,12 +8,12 @@
 # retrieval augmented generation) cevap ürettirir; LLM kendi ezberinden/halüsinasyonla
 # cevap üretmeye bırakılmaz.
 #
-# HAKKIMDA kasası Cloudflare D1'de yönetiliyor (bkz. cloudflare-worker/
-# schema.sql vault_notes, migrate_hakkimda_to_cloud.py); belgeler yerel
-# önbellekten (vault_cache.py — cloud_sync.sync_vault_from_cloud tarafından
-# periyodik doldurulur) okunur. Güvenlik: Şifrelerim.md göçte
-# (bkz. migrate_hakkimda_to_cloud.py EXCLUDE_FILENAMES) kasıtlı olarak hiç
-# D1'e taşınmadı — şifre ipuçları bu aramaya hiç dahil edilmez.
+# HAKKIMDA kasası ile Cloudflare D1'deki vault_notes tablosu ÇİFT YÖNLÜ
+# senkronize (bkz. vault_sync_bidi.py); belgeler burada yerel önbellekten
+# (vault_cache.py — cloud_sync.sync_vault_from_cloud tarafından açılışta
+# doldurulur) okunur. Güvenlik: Şifrelerim.md ne push'ta ne pull'da hiçbir
+# zaman senkronize edilmez (bkz. vault_sync_bidi.py EXCLUDE_FILENAMES /
+# _is_excluded_path) — şifre ipuçları bu aramaya hiç dahil edilmez.
 
 import math
 import re

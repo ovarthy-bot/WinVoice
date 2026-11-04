@@ -1,17 +1,18 @@
 # migrate_hakkimda_to_cloud.py
 #
 # HAKKIMDA (Obsidian kasası) notlarını Cloudflare D1'deki vault_notes
-# tablosuna (bkz. cloudflare-worker/schema.sql) TEK SEFERLİK taşır. Bu
-# noktadan sonra kasa SADECE D1'de yönetilir; yerel HAKKIMDA/*.md dosyaları
-# güncellenmeyen bir anlık görüntü olarak kalır (bkz. vault_knowledge.py /
-# personal_context.py modül yorumları — artık buradan DEĞİL, D1'den
-# senkronize edilen yerel önbellekten, vault_cache.py, okurlar).
+# tablosuna (bkz. cloudflare-worker/schema.sql) TOPLU olarak taşır. ESKİDEN
+# bu, kasayı D1'e geçirmek için TEK SEFERLİK bir araçtı; artık kasa ile D1
+# vault_sync_bidi.py üzerinden ÇİFT YÖNLÜ senkronize oluyor (yerel düzenleme/
+# silme D1'e, D1 düzenleme/silme yerele yansıyor) — bu script o akışın
+# YERİNE geçmedi, sadece ilk kurulum / felaket kurtarma (ör. D1 sıfırdan
+# oluşturulduğunda kasayı tek seferde doldurmak) için zararsız bir araç
+# olarak kaldı. Normal kullanımda bunu elle çalıştırmaya gerek yoktur.
 #
 # import_hakkimda_notes.py'nin güvencesiyle AYNI ilke: HAKKIMDA/ altındaki
 # HİÇBİR DOSYA silinmez, taşınmaz veya değiştirilmez; yalnızca okunur.
-# Dışlama kuralları vault_knowledge.py'nin ESKİ (D1'e taşınmadan önceki)
-# dosya taramasıyla AYNI: Obsidian/MakeMD'nin iç klasörleri ve Şifrelerim.md
-# hiçbir zaman buluta gönderilmez.
+# Dışlama kuralları vault_sync_bidi.py'deki ile AYNI: Obsidian/MakeMD'nin iç
+# klasörleri ve Şifrelerim.md hiçbir zaman buluta gönderilmez.
 #
 # Yeniden çalıştırılabilir (idempotent): /vault/import, path'e göre upsert
 # yapar (bkz. index.js handleVaultImport) — ikinci bir çalıştırma sadece

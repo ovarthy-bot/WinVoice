@@ -19,6 +19,11 @@ CLOUD_WORKER_URL_KEY = "cloud_worker_url"
 CLOUD_SYNC_SECRET_KEY = "cloud_sync_secret"
 CLOUD_SYNC_LAST_MESSAGE_ID_KEY = "cloud_sync_last_message_id"
 CLOUD_SYNC_LAST_NOTE_ID_KEY = "cloud_sync_last_note_id"
+# HAKKIMDA kasası <-> D1 vault_notes çift yönlü senkronunun cursor'ı (bkz.
+# vault_sync_bidi.py) — en son görülen vault_notes.updated_at /
+# vault_notes_deleted.deleted_at değeri. Mesaj/not cursor'larından farklı
+# olarak id değil zaman damgası, çünkü vault_notes'ta autoincrement id yok.
+CLOUD_SYNC_LAST_VAULT_SYNC_AT_KEY = "cloud_sync_last_vault_sync_at"
 
 
 def get_telegram_bot_token():
@@ -83,3 +88,11 @@ def get_cloud_sync_last_note_id():
 
 def set_cloud_sync_last_note_id(note_id):
     set_setting(CLOUD_SYNC_LAST_NOTE_ID_KEY, note_id)
+
+
+def get_cloud_sync_last_vault_sync_at():
+    return get_setting(CLOUD_SYNC_LAST_VAULT_SYNC_AT_KEY, "1970-01-01T00:00:00.000Z")
+
+
+def set_cloud_sync_last_vault_sync_at(timestamp):
+    set_setting(CLOUD_SYNC_LAST_VAULT_SYNC_AT_KEY, timestamp)

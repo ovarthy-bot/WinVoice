@@ -1,15 +1,17 @@
 # vault_cache.py
 #
-# HAKKIMDA (Obsidian kasası) notlarının yerel, SALT OKUNUR önbelleği.
-# Kasa artık SADECE Cloudflare D1'de yönetiliyor (bkz. cloudflare-worker/
-# schema.sql vault_notes tablosu, migrate_hakkimda_to_cloud.py); yerel
-# HAKKIMDA/*.md dosyaları güncellenmeyen bir anlık görüntüden ibaret.
+# HAKKIMDA (Obsidian kasası) notlarının yerel, SALT OKUNUR RAG önbelleği.
+# Kasa artık D1 ile HAKKIMDA/*.md arasında ÇİFT YÖNLÜ senkronize oluyor
+# (bkz. vault_sync_bidi.py) — bu modül o senkronun bir PARÇASI değil, ayrı
+# bir amaca hizmet ediyor: vault_knowledge.py'nin arama yapabilmesi için
+# D1'in HIZLI, yerel bir salt-okunur kopyası.
 #
-# cloud_sync.sync_vault_from_cloud() bu tabloyu periyodik olarak D1'den
-# yeniden doldurur (bkz. dashboard_ui._start_note_management_services);
-# vault_knowledge.py ve personal_context.py SADECE buradan okur — internet
-# kesilse bile sesli asistan son senkronize edilen veriyle çalışmaya devam
-# eder (note_database.py'nin Telegram notları için kullandığı AYNI "D1
+# cloud_sync.sync_vault_from_cloud() bu tabloyu açılışta D1'den yeniden
+# doldurur (bkz. dashboard_ui._start_note_management_services, vault_sync_bidi
+# çağrısından HEMEN SONRA — böylece önbellek her zaman en güncel D1 verisini
+# yansıtır); vault_knowledge.py ve personal_context.py SADECE buradan okur —
+# internet kesilse bile sesli asistan son senkronize edilen veriyle çalışmaya
+# devam eder (note_database.py'nin Telegram notları için kullandığı AYNI "D1
 # birincil kaynak, yerel SQLite önbellek" deseni).
 #
 # PyQt5'ten bağımsızdır; sadece stdlib (sqlite3) kullanır (bkz.

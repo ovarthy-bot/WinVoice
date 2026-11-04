@@ -35,6 +35,7 @@ import tr_dates
 import telegram_settings
 import note_database
 import vault_cache
+import vault_sync_bidi
 import cloud_sync
 import cloud_sync_service
 
@@ -1083,9 +1084,16 @@ class DailyDashboardWindow(QWidget):
         except Exception as e:
             print(f"⚠️ Bulut ayarları gönderilemedi: {e}")
 
-        # HAKKIMDA artık SADECE Cloudflare D1'de yönetildiği için (bkz.
-        # vault_knowledge.py / personal_context.py modül yorumları), sesli
-        # asistanın kullandığı yerel önbellek her açılışta D1 ile güncellenir.
+        # HAKKIMDA (yerel kasa) ve D1'deki vault_notes artık ÇİFT YÖNLÜ
+        # senkronize (bkz. vault_sync_bidi.py) — SADECE açılışta, bir kez:
+        # önce yereldeki değişiklikler/silmeler D1'e itilir, sonra D1'deki
+        # değişiklikler/silmeler yerele çekilir. Ardından RAG'in kullandığı
+        # salt-okunur önbellek (vault_cache.py) de D1 ile tazelenir.
+        try:
+            vault_sync_bidi.sync()
+        except Exception as e:
+            print(f"⚠️ Kasa çift yönlü senkronu başarısız: {e}")
+
         try:
             synced = cloud_sync.sync_vault_from_cloud()
             if synced:

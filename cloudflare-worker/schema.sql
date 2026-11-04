@@ -65,15 +65,27 @@ CREATE TABLE IF NOT EXISTS app_config (
     updated_at TEXT NOT NULL
 );
 
--- HAKKIMDA (Obsidian kasası) notlarının birincil deposu. Kasa artık SADECE
--- buradan yönetiliyor; yerel HAKKIMDA/*.md dosyaları güncellenmeyen bir
--- anlık görüntüden ibaret (bkz. migrate_hakkimda_to_cloud.py). WinVoice
--- (vault_knowledge.py / personal_context.py) GET /vault/sync ile bunu
--- yerel bir önbelleğe çeker (bkz. vault_cache.py, cloud_sync.py).
+-- HAKKIMDA (Obsidian kasası) notlarının bulut kopyası. Yerel HAKKIMDA/*.md
+-- dosyaları ve bu tablo ÇİFT YÖNLÜ senkronize edilir (bkz. vault_sync_bidi.py):
+-- biri yerelde düzenlerse POST /vault/import, D1'de değişirse GET
+-- /vault/sync?since=... ile yerele iner. WinVoice (vault_knowledge.py /
+-- personal_context.py) ayrıca bunu salt-okunur bir RAG önbelleğine de çeker
+-- (bkz. vault_cache.py, cloud_sync.py).
 CREATE TABLE IF NOT EXISTS vault_notes (
     path TEXT PRIMARY KEY,
     title TEXT NOT NULL,
     content TEXT NOT NULL,
     folder TEXT NOT NULL,
     updated_at TEXT NOT NULL
+);
+
+-- vault_notes'tan silinen notların "mezar taşı" kaydı. Silme işlemi bir
+-- satırı yok ederken bu bilgiyi de kaybeder; GET /vault/sync?since=...
+-- çağıran taraf "bu path artık yok" bilgisini SADECE bu tablo üzerinden
+-- öğrenebilir (bkz. handleVaultDelete, handleVaultSync içindeki deletes
+-- sorgusu). Bir path yeniden eklenirse (handleVaultImport) buradaki kaydı
+-- temizler — diriltilen bir not bir daha "silinmiş" diye raporlanmasın.
+CREATE TABLE IF NOT EXISTS vault_notes_deleted (
+    path TEXT PRIMARY KEY,
+    deleted_at TEXT NOT NULL
 );

@@ -129,24 +129,37 @@ curl "https://api.telegram.org/bot<BOT_TOKEN>/deleteWebhook"
 ```
 ve dashboard_ui.py'de `_start_note_management_services`'i eski haline getirin.
 
-## HAKKIMDA (Obsidian kasası) — artık D1'de
+## HAKKIMDA (Obsidian kasası) — D1 ile çift yönlü senkron
 
-HAKKIMDA kasası artık yerel dosya sisteminden değil, `vault_notes` D1
-tablosundan yönetiliyor; yerel `HAKKIMDA/*.md` dosyaları güncellenmeyen bir
-anlık görüntüden ibaret. WinVoice (`vault_knowledge.py`, `personal_context.py`)
-`GET /vault/sync` ile bunu yerel bir önbelleğe (`vault_cache.py`) çeker —
-Telegram notlarının `notes.db` ile çalıştığı AYNI model.
+HAKKIMDA kasası (`HAKKIMDA/*.md`) ve `vault_notes` D1 tablosu artık ÇİFT
+YÖNLÜ senkronize oluyor (bkz. `vault_sync_bidi.py`), sadece PC her açıldığında
+(periyodik arka plan taraması yok):
 
-- **Tek seferlik göç / yeniden yükleme**: `python migrate_hakkimda_to_cloud.py`
-  — yerel kasayı okur, `POST /vault/import` ile D1'e upsert eder (path'e göre,
-  yeniden çalıştırılabilir). HİÇBİR yerel dosyayı silmez/değiştirmez.
-- **Not ekleme/düzenleme artık buluttan**: `wrangler d1 execute` ile doğrudan
-  `vault_notes` tablosuna yazılabilir, ör.:
+- **Yerel → D1**: `POST /vault/import` ile değişen/yeni notlar upsert edilir
+  (path'e göre, yeniden çalıştırılabilir); yerelde silinen notlar
+  `POST /vault/delete` ile D1'den de silinir (bkz. `vault_notes_deleted`
+  "mezar taşı" tablosu — silinen path bir süre sonra tekrar eklenirse
+  silme kaydı otomatik temizlenir).
+- **D1 → Yerel**: `GET /vault/sync?since=<ISO zaman damgası>` son
+  senkrondan beri değişen/silinen notları döner; değişenler `HAKKIMDA/`
+  altına yazılır, silinenler yereldeki karşılık gelen `.md` dosyasıyla
+  birlikte kaldırılır.
+- **Çakışma politikası**: aynı not hem yerelde hem D1'de değişmişse D1
+  kazanır, ama kaybeden yerel içerik `<ad> (sync-conflict <ts>).md` olarak
+  yedeklenir — hiçbir içerik sessizce kaybolmaz. Yerelde bekleyen (henüz
+  push edilmemiş) bir düzenleme varken D1'den silme geldiyse, silme yerine
+  düzenleme kazanır (not bir sonraki push'ta D1'de "dirilir").
+- **Manuel D1 düzenlemesi** hâlâ mümkün (artık geriye uyumlu, çünkü bir
+  sonraki PC açılışında otomatik yerele iner), ör.:
   ```bash
-  npx wrangler d1 execute winvoice-notes --remote --command="UPDATE vault_notes SET content = 'yeni içerik' WHERE path = '50_Rutinler/Doğum Günleri ve Randevular.md'"
+  npx wrangler d1 execute winvoice-notes --remote --command="UPDATE vault_notes SET content = 'yeni içerik', updated_at = datetime('now') WHERE path = '50_Rutinler/Doğum Günleri ve Randevular.md'"
   ```
-- WinVoice, her PC açılışında (`dashboard_ui.py` → `cloud_sync.sync_vault_from_cloud()`)
-  önbelleği günceller.
+- **İlk kurulum / felaket kurtarma**: `python migrate_hakkimda_to_cloud.py`
+  — kasanın tamamını D1'e toplu yükler (idempotent upsert). Normal
+  kullanımda gerekmez, çift yönlü senkron bunu zaten kapsar.
+- Ayrıca `vault_cache.py` (RAG arama önbelleği) her PC açılışında
+  (`dashboard_ui.py` → `cloud_sync.sync_vault_from_cloud()`), çift yönlü
+  senkrondan hemen sonra tazelenir.
 
 ## Geliştirirken
 ```bash
