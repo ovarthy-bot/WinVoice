@@ -81,6 +81,14 @@ KURALLAR:
    başlıkları (ör. Airbus, Boeing, yapay zeka veya yazılım haberlerini) doğal Türkçeye
    çevirerek özetle; şirket/model/özel isimler dışında İngilizce kelime bırakma.
    {uzunluk_talimati}
+   KAYNAK BAĞLANTILARI VE REFERANS KURALI:
+   Metindeki her bağımsız haber cümlesinin veya paragrafının sonuna, o haberin referans alındığı
+   kaynağın URL'sini içeren numaralandırılmış bir tıklanabilir bağlantı (buton) ekle. Numaralandırma
+   1'den başlamalı ve sırayla artmalıdır:
+   [Haberin veya bilginin metni.] [[Numara]](Kaynak_URL)
+   Örnek kullanım:
+   Bugün küresel piyasalarda teknoloji hisseleri rekor seviyelere ulaştı. [[1]](https://ornek-finans-haberi.com/hisse-rekor) Ayrıca, güneş enerjisi yatırımlarında yeni bir teşvik paketi duyuruldu. [[2]](https://ornek-enerji-haberi.com/tesvik)
+   Haberleri kendi cümlelerinle özetle ve ilgili referans butonunu tam olarak cümlenin bitimine (noktadan hemen sonra) yerleştir.
 3. PERSONA VE HİTAP:
    - Hitap kuralı: {hitap_talimati}
    - Espri: {espri_talimati}
@@ -95,7 +103,7 @@ KURALLAR:
      akıcı paragrafta özetle.
    - Son Paragraf (Odaklı Kapanış): Basmakalıp motivasyon sözleri yerine "{odak_ipucu}"
      odağına atıf yapan {kapanis_ipucu}
-5. ÇIKTI FORMATI: Başlık, madde işareti, markdown veya emoji ekleme; bölümler arasında
+5. ÇIKTI FORMATI: Başlık, madde işareti veya gereksiz emoji ekleme (kaynak bağlantısı için [[Numara]](URL) formatı hariç); bölümler arasında
    yalnızca birer boş satır bırak.
 
 Brifing:"""

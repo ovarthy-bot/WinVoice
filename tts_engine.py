@@ -38,6 +38,12 @@ PIPER_MODEL_FILE_SUFFIXES = (".onnx", ".onnx.json", ".voice.txt")
 EMA_VOICE_ID = "ema_lightning"
 EMA_VOICE_DESCRIPTION = "EMA Lightning - Türkçe (çevrimdışı, nöral)"
 
+# Ahenk Cep (bkz. ahenk_tts_engine.py): EMA Lightning gibi SAPI'den bağımsız
+# yerel bir model, aynı şekilde sabit {"id", "description"} girişi olarak
+# listeleniyor.
+AHENK_VOICE_ID = "ahenk_cep"
+AHENK_VOICE_DESCRIPTION = "Ahenk Cep - Türkçe (çevrimdışı, nöral, f022 sesi)"
+
 
 def _piper_model_label(stem):
     """'tr_TR-fahrettin-medium' -> 'Fahrettin'. Piper'ın dosya adı kuralı
@@ -139,6 +145,13 @@ def list_turkish_voices():
             voices.append({"id": EMA_VOICE_ID, "description": EMA_VOICE_DESCRIPTION})
     except Exception as e:
         print(f"⚠️ EMA Lightning sesi listelenemedi: {e}")
+
+    try:
+        from ahenk_tts_engine import ahenk_tts
+        if ahenk_tts.available():
+            voices.append({"id": AHENK_VOICE_ID, "description": AHENK_VOICE_DESCRIPTION})
+    except Exception as e:
+        print(f"⚠️ Ahenk Cep sesi listelenemedi: {e}")
 
     return voices
 
@@ -246,16 +259,23 @@ def _speak_once(texto):
 
 
 def _speak_once_turkish(texto):
-    """Seçili ses EMA Lightning ise onunla, değilse pyttsx3 motoruyla, aynı
-    süreç içinde metni okur. EMA Lightning başarısız olursa (model dosyaları
-    eksik, onnxruntime hatası vb.) mevcut pyttsx3 sesine geri döner, böylece
-    asistan sessiz kalmaz."""
-    if get_selected_voice_id() == EMA_VOICE_ID:
+    """Seçili ses EMA Lightning veya Ahenk Cep ise onunla, değilse pyttsx3
+    motoruyla, aynı süreç içinde metni okur. Seçili nöral ses başarısız
+    olursa (model dosyaları eksik, onnxruntime/torch hatası vb.) mevcut
+    pyttsx3 sesine geri döner, böylece asistan sessiz kalmaz."""
+    selected = get_selected_voice_id()
+    if selected == EMA_VOICE_ID:
         try:
             _speak_once_ema(texto)
             return
         except Exception as e:
             print(f"⚠️ EMA Lightning sesi başarısız oldu, mevcut sese dönülüyor: {e}")
+    elif selected == AHENK_VOICE_ID:
+        try:
+            _speak_once_ahenk(texto)
+            return
+        except Exception as e:
+            print(f"⚠️ Ahenk Cep sesi başarısız oldu, mevcut sese dönülüyor: {e}")
 
     engine = pyttsx3.init()
     _set_turkish_voice(engine)
@@ -267,6 +287,11 @@ def _speak_once_turkish(texto):
 def _speak_once_ema(texto):
     from ema_tts_engine import speak as ema_speak
     ema_speak(texto)
+
+
+def _speak_once_ahenk(texto):
+    from ahenk_tts_engine import speak as ahenk_speak
+    ahenk_speak(texto)
 
 
 def _speak_once_kokoro(texto):

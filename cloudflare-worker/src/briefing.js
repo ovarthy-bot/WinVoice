@@ -201,11 +201,14 @@ async function fetchSingleFeed(source) {
       const title = stripHtmlTags(extractTag(block, "title"));
       if (!title || isClickbait(title)) continue;
       const summary = truncate(stripHtmlTags(extractTag(block, source.summaryTag)));
+      const linkMatch = block.match(/<link[^>]+href=["']([^"']+)["']/i);
+      const link = (linkMatch ? linkMatch[1] : extractTag(block, "link") || "").trim();
       const pubRaw = extractTag(block, source.pubTag) || extractTag(block, "updated") || "";
       const pubMs = pubRaw ? Date.parse(pubRaw) : NaN;
       results.push({
         title,
         summary,
+        link,
         category: source.category,
         source: source.name,
         pubMs: Number.isFinite(pubMs) ? pubMs : null,
@@ -363,6 +366,7 @@ async function fetchNewsItemsText(db, lengthMode = "balanced") {
     .map((item) => {
       let line = `[${item.category}] ${item.title}`;
       if (item.summary) line += ` — ${item.summary}`;
+      if (item.link) line += ` (Kaynak: ${item.link})`;
       return line;
     })
     .join("\n");
@@ -763,6 +767,12 @@ görev hakkında tek bir kelime bile yazma.
 KURALLAR:
 1. SAYI VE SEMBOLLER: Telegram ekranında okunacağı için tarih, yüzde ve sayıları doğal, okunaklı biçimde yazabilirsin.
 2. DİL VE HABER SEÇİMİ: Nihai çıktının TAMAMI akıcı, doğal Türkçe olmalı. İngilizce başlıkları (ör. Airbus, Boeing, yapay zeka veya yazılım haberlerini) doğal Türkçeye çevirerek özetle; şirket/model/özel isimler dışında İngilizce kelime bırakma. ${lengthTalimatiText}
+   KAYNAK BAĞLANTILARI VE REFERANS KURALI:
+   Metindeki her bağımsız haber cümlesinin veya paragrafının sonuna, o haberin referans alındığı kaynağın URL'sini içeren numaralandırılmış bir tıklanabilir bağlantı (buton) ekle. Numaralandırma 1'den başlamalı ve sırayla artmalıdır:
+   [Haberin veya bilginin metni.] [[Numara]](Kaynak_URL)
+   Örnek kullanım:
+   Bugün küresel piyasalarda teknoloji hisseleri rekor seviyelere ulaştı. [[1]](https://ornek-finans-haberi.com/hisse-rekor) Ayrıca, güneş enerjisi yatırımlarında yeni bir teşvik paketi duyuruldu. [[2]](https://ornek-enerji-haberi.com/tesvik)
+   Haberleri kendi cümlelerinle özetle ve ilgili referans butonunu tam olarak cümlenin bitimine (noktadan hemen sonra) yerleştir.
 3. PERSONA VE HİTAP:
    - Hitap kuralı: ${hitapTalimatiText}
    - Espri: ${espriTalimatiText}
@@ -772,7 +782,7 @@ KURALLAR:
    - 1. Paragraf (Giriş): "${timeCtx.greeting}" ile başlayan, hitap kuralına uyan tek cümlelik kısa ve doğal bir açılış.
    - 2. Paragraf (Seçilmiş Gündem): Yukarıdaki önceliklendirilmiş haberleri (Havacılık, Yapay Zeka/Yazılım ve Türkiye/Dünya gündemi) tekrar etmeden, tek veya en fazla iki akıcı paragrafta özetle.
    - Son Paragraf (Odaklı Kapanış): Basmakalıp motivasyon sözleri yerine "${focusHint}" odağına atıf yapan ${timeCtx.closingHint}
-5. ÇIKTI FORMATI: Başlık, madde işareti, markdown veya emoji ekleme; bölümler arasında yalnızca birer boş satır bırak.
+5. ÇIKTI FORMATI: Başlık, madde işareti veya gereksiz emoji ekleme (kaynak bağlantısı için [[Numara]](URL) formatı hariç); bölümler arasında yalnızca birer boş satır bırak.
 
 Brifing:`;
 }

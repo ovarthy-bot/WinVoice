@@ -75,16 +75,31 @@ export async function sendTelegramMessage(env, chatId, text, options = {}) {
 
   for (let i = 0; i < chunks.length; i++) {
     const isLast = i === chunks.length - 1;
-    const payload = { chat_id: chatId, text: chunks[i] };
+    const payload = {
+      chat_id: chatId,
+      text: chunks[i],
+      parse_mode: options.parseMode || "Markdown",
+      disable_web_page_preview: true,
+    };
     if (isLast && replyMarkup) {
       payload.reply_markup = replyMarkup;
     }
-    const res = await fetch(url, {
+    let res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    const result = await res.json();
+    let result = await res.json();
+    if (!result.ok && payload.parse_mode) {
+      // Markdown ayrıştırma hatası (ör. unescaped alt çizgi) olursa düz metin olarak güvenle tekrar dene
+      delete payload.parse_mode;
+      res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      result = await res.json();
+    }
     if (!result.ok) {
       console.error("Telegram sendMessage hatası:", JSON.stringify(result));
     }

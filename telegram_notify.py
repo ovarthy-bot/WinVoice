@@ -51,7 +51,13 @@ def send_message(bot_token, chat_id, text, timeout=15):
     url = f"{TELEGRAM_API_BASE}/bot{bot_token}/sendMessage"
 
     for chunk in _split_text(text, TELEGRAM_MAX_MESSAGE_LEN):
-        payload = json.dumps({"chat_id": chat_id, "text": chunk}).encode("utf-8")
+        payload_dict = {
+            "chat_id": chat_id,
+            "text": chunk,
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": True,
+        }
+        payload = json.dumps(payload_dict).encode("utf-8")
         req = urllib.request.Request(
             url, data=payload, headers={"Content-Type": "application/json"}, method="POST",
         )
@@ -59,8 +65,23 @@ def send_message(bot_token, chat_id, text, timeout=15):
             with urllib.request.urlopen(req, timeout=timeout) as response:
                 result = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
+            # Markdown biçimlendirme hatası (ör. URL'deki alt çizgi) olursa düz metin olarak güvenle tekrar dene
             body = e.read().decode("utf-8", errors="replace")
-            raise TelegramError(f"Telegram API hatası ({e.code}): {body}") from e
+            if e.code == 400:
+                payload_dict.pop("parse_mode", None)
+                retry_req = urllib.request.Request(
+                    url,
+                    data=json.dumps(payload_dict).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                try:
+                    with urllib.request.urlopen(retry_req, timeout=timeout) as retry_resp:
+                        result = json.loads(retry_resp.read().decode("utf-8"))
+                except Exception:
+                    raise TelegramError(f"Telegram API hatası ({e.code}): {body}") from e
+            else:
+                raise TelegramError(f"Telegram API hatası ({e.code}): {body}") from e
         except urllib.error.URLError as e:
             raise TelegramError(f"Telegram'a bağlanılamadı: {e}") from e
 

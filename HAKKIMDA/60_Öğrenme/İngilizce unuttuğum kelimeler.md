@@ -10,6 +10,7 @@ Hatırlamak istediğin İngilizce kelimeler.
 | ------ | ----- | --- | -------- |
 | advent | keşif |     |          |
 | Beyond | Ötesi |     |          |
+| behaviour | Davranış |     |          |
 
 ## İlgili Bağlantılar
 

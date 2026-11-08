@@ -17,3 +17,11 @@ normalizer-tr
 kokoro-onnx
 espeakng-loader
 phonemizer
+# Ahenk Cep (bkz. ahenk_tts_engine.py, models/ahenk_cep): resmi
+# ema-lightning paketi + CPU'lu torch tekeri (büyük indirme, ~150-200 MB).
+# trnorm, ahenk-turkish-tts deposundan kuruluyor çünkü PyPI'da yayınlanmış
+# değil (Apache-2.0, https://github.com/ozguradmin/ahenk-turkish-tts).
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+ema-lightning==1.1.2
+trnorm @ git+https://github.com/ozguradmin/ahenk-turkish-tts

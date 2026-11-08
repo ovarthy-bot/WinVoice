@@ -270,6 +270,12 @@ def _fetch_single_feed(source):
                 if not title or _is_clickbait(title):
                     continue
                 summary = _truncate(_strip_html(entry.findtext("a:summary", namespaces=ns) or ""))
+                link_el = entry.find("a:link", ns)
+                link = ""
+                if link_el is not None:
+                    link = (link_el.attrib.get("href") or "").strip()
+                if not link:
+                    link = (entry.findtext("a:id", namespaces=ns) or "").strip()
                 pub = (
                     entry.findtext("a:published", namespaces=ns)
                     or entry.findtext("a:updated", namespaces=ns)
@@ -278,6 +284,7 @@ def _fetch_single_feed(source):
                 results.append({
                     "title": title,
                     "summary": summary,
+                    "link": link,
                     "category": category,
                     "source": source["name"],
                     "pub_dt": _parse_pub_datetime(pub),
@@ -290,10 +297,12 @@ def _fetch_single_feed(source):
                 if not title or _is_clickbait(title):
                     continue
                 summary = _truncate(_strip_html(item.findtext("description") or ""))
+                link = (item.findtext("link") or "").strip()
                 pub = item.findtext("pubDate") or ""
                 results.append({
                     "title": title,
                     "summary": summary,
+                    "link": link,
                     "category": category,
                     "source": source["name"],
                     "pub_dt": _parse_pub_datetime(pub),
@@ -470,6 +479,8 @@ def fetch_news_items_text(length_mode=None, record_seen=True):
         line = f"[{item['category']}] {item['title']}"
         if item.get("summary"):
             line += f" — {item['summary']}"
+        if item.get("link"):
+            line += f" (Kaynak: {item['link']})"
         lines.append(line)
     return "\n".join(lines)
 

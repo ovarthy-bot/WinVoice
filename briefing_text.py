@@ -350,6 +350,12 @@ def assemble_final_briefing(
         news_paragraphs = [llm_paragraphs[1]]
         closing_p = ""
 
+    if for_tts:
+        # Sesli okumada (TTS) link ve URL etiketlerini temizle ki Kokoro/EMA ham link okumasın
+        greeting_p = re.sub(r"\s*\[\[\d+\]\]\([^\)]+\)", "", greeting_p)
+        closing_p = re.sub(r"\s*\[\[\d+\]\]\([^\)]+\)", "", closing_p)
+        news_paragraphs = [re.sub(r"\s*\[\[\d+\]\]\([^\)]+\)", "", p) for p in news_paragraphs]
+
     personal_p = briefing_coordinator.build_personal_coordination_paragraph(
         today=today_d, length_mode=length_mode, for_tts=for_tts,
     )
