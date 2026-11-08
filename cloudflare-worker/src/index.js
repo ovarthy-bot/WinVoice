@@ -26,13 +26,15 @@ import {
   handleCallbackQuery,
 } from "./menu.js";
 
-const CATEGORIES = ["appointment", "shopping", "reminder", "general", "query"];
+const CATEGORIES = ["appointment", "shopping", "reminder", "task", "general", "query"];
 const CONFIDENCES = ["high", "medium", "low"];
+const PRIORITIES = ["high", "normal", "low"];
 
 // Kategoriye özgü alanlar — note_classifier._CATEGORY_FIELD_MAP ile aynı eşleme.
 const CATEGORY_FIELD_MAP = {
   appointment: { tarih: "appt_date", saat: "appt_time", konum: "location", ilgili_kisi: "related_person" },
   shopping: { urun_adi: "product_name", urun_miktari: "quantity" },
+  task: { son_tarih: "due_date", baglam: "context" },
   reminder: { hatirlatma_zamani: "remind_at", tekrar_sikligi: "repeat_frequency" },
   general: {},
   query: {},
@@ -41,6 +43,7 @@ const CATEGORY_FIELD_MAP = {
 const CATEGORY_LABELS = {
   appointment: "Randevu",
   shopping: "Alışveriş",
+  task: "Görev",
   reminder: "Hatırlatma",
   general: "Genel Not",
 };
@@ -60,14 +63,17 @@ KURALLAR:
    Tek bir konu/bilgiyse dizide tek eleman olur.
 2. Her nesnede şu alanlar MUTLAKA bulunur:
    - "kategori": SADECE "appointment" (randevu/buluşma/teslim tarihi),
-     "shopping" (satın alınacak ürün), "reminder" (genel hatırlatma/yapılacak
-     iş, bir tarihe/saate bağlı olsun ya da olmasın), "general" (hiçbirine
-     net uymayan not) veya "query" (kullanıcı bir BİLGİ SORUYOR ya da notlarından
-     bir şey hatırlamak istiyor; ör. "ne zaman...?", "kaç gün geçti?", "var mı?")
-     değerlerinden biri. "query" ise not KAYDEDİLMEZ; sorunun kendisi "açıklama"ya yazılır.
+     "shopping" (satın alınacak ürün), "task" (somut yapılacak iş/aksiyon/tamir/başvuru,
+     ör. "banyodaki askıyı sök", "eğitim kaydını tamamla"), "reminder" (belirli bir
+     zamanda/periyotta hatırlatılacak konu), "general" (aksiyon gerektirmeyen bilgi/fikir/referans
+     notu) veya "query" (kullanıcı bir BİLGİ SORUYOR ya da notlarından bir şey hatırlamak
+     istiyor; ör. "ne zaman...?", "kaç gün geçti?", "var mı?") değerlerinden biri.
+     "query" ise not KAYDEDİLMEZ; sorunun kendisi "açıklama"ya yazılır.
    - "güven": "high" (kategori ve ana bilgi açık/net), "medium" (kategori
      muhtemel ama bazı alanlar belirsiz) veya "low" (mesaj çok belirsiz,
      kategori veya niyet net değil) değerlerinden biri.
+   - "öncelik": mesajda "acil", "çok önemli", "mutlaka", "hemen" gibi bir vurgu varsa "high",
+     "acelesi yok", "boş vakitte" varsa "low", aksi halde "normal".
    - "başlık": kısa (en fazla ~60 karakter), notu özetleyen bir başlık.
    - "açıklama": mesajın ilgili kısmının kendisi veya kısa bir özeti.
 3. Kategoriye göre, mesajda AÇIKÇA belirtilmişse şu ek alanları da doldur;
@@ -75,6 +81,8 @@ KURALLAR:
    - appointment: "tarih" ("YYYY-MM-DD" biçiminde), "saat", "konum",
      "ilgili_kisi".
    - shopping: "urun_adi", "urun_miktari".
+   - task: "son_tarih" (açık tarih varsa "YYYY-MM-DD" biçiminde, yoksa null),
+     "baglam" ("ev", "iş", "proje", "kişisel" vb., belirtilmemişse null).
    - reminder: "hatirlatma_zamani" (mesajda açık bir tarih varsa
      "YYYY-MM-DDTHH:MM" biçiminde; saat belirtilmemişse "09:00" kullan),
      "tekrar_sikligi" (ör. "yok", "gunluk", "haftalik", "aylik", "yillik";
@@ -98,22 +106,25 @@ KURALLAR:
 ÖRNEKLER:
 
 Mesaj: "02.11.2026 tarihinde galley aparatını teslim etmem gerekiyor."
-JSON: [{"kategori": "appointment", "güven": "high", "başlık": "Galley aparatı teslimi", "açıklama": "02.11.2026 tarihinde galley aparatını teslim etmem gerekiyor.", "tarih": "2026-11-02", "saat": null, "konum": null, "ilgili_kisi": null}]
+JSON: [{"kategori": "appointment", "güven": "high", "öncelik": "normal", "başlık": "Galley aparatı teslimi", "açıklama": "02.11.2026 tarihinde galley aparatını teslim etmem gerekiyor.", "tarih": "2026-11-02", "saat": null, "konum": null, "ilgili_kisi": null}]
 
 Mesaj: "Annem için perma tarağı satın al"
-JSON: [{"kategori": "shopping", "güven": "high", "başlık": "Annem için perma tarağı", "açıklama": "Annem için perma tarağı satın alınacak.", "urun_adi": "perma tarağı", "urun_miktari": null}]
+JSON: [{"kategori": "shopping", "güven": "high", "öncelik": "normal", "başlık": "Annem için perma tarağı", "açıklama": "Annem için perma tarağı satın alınacak.", "urun_adi": "perma tarağı", "urun_miktari": null}]
+
+Mesaj: "Banyodaki askıyı acil söküp yerine sensörlü lamba takmam lazım"
+JSON: [{"kategori": "task", "güven": "high", "öncelik": "high", "başlık": "Banyodaki askıyı söküp lamba tak", "açıklama": "Banyodaki askı sökülüp yerine sensörlü lamba takılacak.", "son_tarih": null, "baglam": "ev"}]
 
 Mesaj: "yarın süt alacağım, cuma arabayı yıkatacağım, cumartesi Ahmet'le görüşeceğim"
-JSON: [{"kategori": "shopping", "güven": "high", "başlık": "Süt al", "açıklama": "Yarın süt alınacak.", "urun_adi": "süt", "urun_miktari": null}, {"kategori": "reminder", "güven": "medium", "başlık": "Araba yıkama", "açıklama": "Cuma günü araba yıkatılacak.", "hatirlatma_zamani": "cuma", "tekrar_sikligi": "yok"}, {"kategori": "appointment", "güven": "high", "başlık": "Ahmet ile görüşme", "açıklama": "Cumartesi Ahmet'le görüşülecek.", "tarih": "cumartesi", "saat": null, "konum": null, "ilgili_kisi": "Ahmet"}]
+JSON: [{"kategori": "shopping", "güven": "high", "öncelik": "normal", "başlık": "Süt al", "açıklama": "Yarın süt alınacak.", "urun_adi": "süt", "urun_miktari": null}, {"kategori": "task", "güven": "medium", "öncelik": "normal", "başlık": "Araba yıkama", "açıklama": "Cuma günü araba yıkatılacak.", "son_tarih": "cuma", "baglam": "kişisel"}, {"kategori": "appointment", "güven": "high", "öncelik": "normal", "başlık": "Ahmet ile görüşme", "açıklama": "Cumartesi Ahmet'le görüşülecek.", "tarih": "cumartesi", "saat": null, "konum": null, "ilgili_kisi": "Ahmet"}]
 
 Mesaj: "bir şeyler var ya neyse"
-JSON: [{"kategori": "general", "güven": "low", "başlık": "Belirsiz not", "açıklama": "bir şeyler var ya neyse"}]
+JSON: [{"kategori": "general", "güven": "low", "öncelik": "normal", "başlık": "Belirsiz not", "açıklama": "bir şeyler var ya neyse"}]
 
 Mesaj: "Örnek hatırlatma notum 03.11.2026 tarihinde saat 12:00'ye ekle."
-JSON: [{"kategori": "reminder", "güven": "high", "başlık": "Örnek hatırlatma", "açıklama": "Örnek hatırlatma notu.", "hatirlatma_zamani": "2026-11-03T12:00", "tekrar_sikligi": "yok"}]
+JSON: [{"kategori": "reminder", "güven": "high", "öncelik": "normal", "başlık": "Örnek hatırlatma", "açıklama": "Örnek hatırlatma notu.", "hatirlatma_zamani": "2026-11-03T12:00", "tekrar_sikligi": "yok"}]
 
 Mesaj: "Askere ne zaman gittim?"
-JSON: [{"kategori": "query", "güven": "high", "başlık": "Askere gitme tarihi sorusu", "açıklama": "Askere ne zaman gittim?"}]
+JSON: [{"kategori": "query", "güven": "high", "öncelik": "normal", "başlık": "Askere gitme tarihi sorusu", "açıklama": "Askere ne zaman gittim?"}]
 
 ---
 
@@ -156,6 +167,9 @@ function normalizeItem(item) {
   let confidence = String(item.güven || item.guven || "low").trim().toLowerCase();
   if (!CONFIDENCES.includes(confidence)) confidence = "low";
 
+  let priority = String(item.öncelik || item.oncelik || "normal").trim().toLowerCase();
+  if (!PRIORITIES.includes(priority)) priority = "normal";
+
   const title = (item.başlık || item.baslik || "").trim() || "Telegram Notu";
   const description = (item.açıklama || item.aciklama || "").trim() || null;
 
@@ -169,9 +183,10 @@ function normalizeItem(item) {
   }
 
   if (extra.appt_date) extra.appt_date = normalizeDate(extra.appt_date);
+  if (extra.due_date) extra.due_date = normalizeDate(extra.due_date);
   if (extra.remind_at) extra.remind_at = normalizeRemindAt(extra.remind_at);
 
-  return { category, confidence, title, description, extra };
+  return { category, confidence, priority, title, description, extra };
 }
 
 // note_classifier.py'deki _normalize_date / _normalize_remind_at'in karşılığı.
@@ -308,19 +323,21 @@ async function markMessageStatus(db, messageId, status, clarificationQuestion) {
 const CATEGORY_TABLES = {
   appointment: ["appointments", ["appt_date", "appt_time", "location", "related_person"]],
   shopping: ["shopping_items", ["product_name", "quantity"]],
+  task: ["tasks", ["due_date", "context"]],
   reminder: ["reminders", ["remind_at", "repeat_frequency", "notified_at"]],
   general: ["general_notes", []],
 };
 
-async function insertNote(db, { category, title, description, confidence, telegramMessageId, needsReview, extra }) {
+async function insertNote(db, { category, title, description, confidence, priority, telegramMessageId, needsReview, extra }) {
   const now = nowIstanbulIso();
   const [tableName, columns] = CATEGORY_TABLES[category];
+  const safePriority = PRIORITIES.includes(priority) ? priority : "normal";
 
   const res = await db
     .prepare(
-      "INSERT INTO notes (telegram_message_id, category, title, description, confidence, needs_review, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+      "INSERT INTO notes (telegram_message_id, category, title, description, confidence, priority, needs_review, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
-    .bind(telegramMessageId, category, title, description, confidence, needsReview ? 1 : 0, now, now)
+    .bind(telegramMessageId, category, title, description, confidence, safePriority, needsReview ? 1 : 0, now, now)
     .run();
   const noteId = res.meta.last_row_id;
 
@@ -341,11 +358,13 @@ const NOTES_SELECT = `
   SELECT n.*,
          a.appt_date, a.appt_time, a.location, a.related_person,
          s.product_name, s.quantity,
-         r.remind_at, r.repeat_frequency, r.notified_at
+         r.remind_at, r.repeat_frequency, r.notified_at,
+         t.due_date, t.context
   FROM notes n
   LEFT JOIN appointments a ON a.note_id = n.id
   LEFT JOIN shopping_items s ON s.note_id = n.id
   LEFT JOIN reminders r ON r.note_id = n.id
+  LEFT JOIN tasks t ON t.note_id = n.id
 `;
 
 async function getNote(db, noteId) {
@@ -408,14 +427,16 @@ async function saveItems(env, db, chatId, items, telegramMessageId, allowClarifi
       title: item.title,
       description: item.description,
       confidence: item.confidence,
+      priority: item.priority,
       telegramMessageId,
       needsReview,
       extra: item.extra,
     });
     const savedNote = await getNote(db, noteId);
     const label = CATEGORY_LABELS[savedNote.category] || "Not";
+    const prioBadge = savedNote.priority === "high" ? " 🔴" : "";
     const reviewHint = savedNote.needs_review ? " (kategoriyi kontrol et — düşük/orta güven)" : "";
-    await sendTelegramMessage(env, chatId, `✅ ${label} eklendi: ${savedNote.title}${reviewHint}`);
+    await sendTelegramMessage(env, chatId, `✅ ${label} eklendi:${prioBadge} ${savedNote.title}${reviewHint}`);
   }
 
   if (unclear.length) {
@@ -576,11 +597,24 @@ async function handleSync(request, env) {
       "ORDER BY n.updated_at DESC LIMIT 100"
   ).all();
 
+  let learningProgress = [];
+  let shiftOverride = "";
+  try {
+    const lpRes = await env.DB.prepare("SELECT * FROM learning_progress").all();
+    learningProgress = lpRes.results || [];
+  } catch (_) {}
+  try {
+    const shRow = await env.DB.prepare("SELECT value FROM app_config WHERE key = 'shift_manual_override'").first();
+    shiftOverride = shRow ? shRow.value || "" : "";
+  } catch (_) {}
+
   return new Response(
     JSON.stringify({
       telegram_messages: messages.results,
       notes: notes.results,
       completed_notes: completedRows.results || [],
+      learning_progress: learningProgress,
+      shift_manual_override: shiftOverride,
     }),
     { headers: { "Content-Type": "application/json" } }
   );
@@ -716,7 +750,9 @@ export default {
       if (auth !== `Bearer ${env.SYNC_SECRET}`) return unauthorized();
       const webhookUrl = `${url.origin}/webhook`;
       const setupResults = await registerBotCommandsAndWebhook(env, webhookUrl);
-      await handleMenuIntent("welcome", env, env.DB, env.TELEGRAM_CHAT_ID, istanbulNowParts());
+      if (url.searchParams.get("silent") !== "1") {
+        await handleMenuIntent("welcome", env, env.DB, env.TELEGRAM_CHAT_ID, istanbulNowParts());
+      }
       return new Response(JSON.stringify({ ok: true, setup: setupResults }), {
         headers: { "Content-Type": "application/json" },
       });

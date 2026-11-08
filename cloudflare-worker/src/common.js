@@ -58,13 +58,14 @@ export const MAIN_MENU_KEYBOARD = {
 
 export const BOT_COMMANDS = [
   { command: "menu", description: "📋 Hızlı seçenek menüsünü göster" },
+  { command: "brifing", description: "📰 Anlık kişisel günlük brifing al" },
+  { command: "vardiya", description: "🛫 R1D vardiya programımı göster / değiştir" },
   { command: "alisveris", description: "🛒 Alışveriş listemde ne var?" },
   { command: "takvim", description: "📅 Aylık takvimimde ne var? (Tekilleştirilmiş)" },
   { command: "randevular", description: "📌 Tüm randevularımı listele (>30 gün dahil)" },
   { command: "isler", description: "✅ Bekleyen işler listemde ne var?" },
   { command: "ozet", description: "🗄️ Veritabanı özetini ver" },
   { command: "gecengun", description: "⏳ Geçen gün hesabı sorgula" },
-  { command: "brifing", description: "📰 Anlık günlük brifing al" },
 ];
 
 export async function sendTelegramMessage(env, chatId, text, options = {}) {

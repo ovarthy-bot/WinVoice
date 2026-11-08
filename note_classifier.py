@@ -20,8 +20,9 @@ _prompt_template = PromptTemplate.from_template(NOTE_CLASSIFICATION_PROMPT)
 # zamanları karşılaştırma için bu ofsetle saklanmalı.
 _ISTANBUL_TZ = timezone(timedelta(hours=3))
 
-VALID_CATEGORIES = ("appointment", "shopping", "reminder", "general", "query")
+VALID_CATEGORIES = ("appointment", "shopping", "reminder", "task", "general", "query")
 VALID_CONFIDENCE = ("high", "medium", "low")
+VALID_PRIORITIES = ("high", "normal", "low")
 
 # Kategoriye özgü alanlar (bkz. prompts.NOTE_CLASSIFICATION_PROMPT KURAL 3) —
 # note_database.py'deki alt tablo sütun adlarına eşlenir.
@@ -30,6 +31,7 @@ _CATEGORY_FIELD_MAP = {
                     "ilgili_kisi": "related_person"},
     "shopping": {"urun_adi": "product_name", "urun_miktari": "quantity"},
     "reminder": {"hatirlatma_zamani": "remind_at", "tekrar_sikligi": "repeat_frequency"},
+    "task": {"son_tarih": "due_date", "baglam": "context"},
     "general": {},
     "query": {},
 }
@@ -135,6 +137,10 @@ def _normalize_item(item):
     if confidence not in VALID_CONFIDENCE:
         confidence = "low"
 
+    priority = str(item.get("öncelik", item.get("oncelik", "normal"))).strip().lower()
+    if priority not in VALID_PRIORITIES:
+        priority = "normal"
+
     title = (item.get("başlık") or item.get("baslik") or "").strip() or "Telegram Notu"
     description = (item.get("açıklama") or item.get("aciklama") or "").strip() or None
 
@@ -146,12 +152,15 @@ def _normalize_item(item):
 
     if "appt_date" in extra:
         extra["appt_date"] = _normalize_date(extra["appt_date"])
+    if "due_date" in extra:
+        extra["due_date"] = _normalize_date(extra["due_date"])
     if "remind_at" in extra:
         extra["remind_at"] = _normalize_remind_at(extra["remind_at"])
 
     return {
         "category": category,
         "confidence": confidence,
+        "priority": priority,
         "title": title,
         "description": description,
         "extra": extra,

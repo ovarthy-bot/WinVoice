@@ -301,7 +301,7 @@ function computeAstroEvents(today) {
 
 const PRIORITY_RANK = { high: 2, medium: 1, low: 0 };
 
-export async function getPrioritizedEvents({ minPriority = "high", withinDays = 14, today, tmdbApiKey, footballApiKey }) {
+export async function getPrioritizedEvents({ minPriority = "high", withinDays = 7, today, tmdbApiKey, footballApiKey }) {
   const bugun = today || new Date(new Date().toISOString().slice(0, 10) + "T00:00:00Z");
   const until = addDays(bugun, withinDays);
 
@@ -328,10 +328,17 @@ export async function getPrioritizedEvents({ minPriority = "high", withinDays = 
   const allEvents = results.flat();
 
   const minRank = PRIORITY_RANK[minPriority] ?? 2;
+  const seenKeys = new Set();
   const filtered = allEvents
     .map((e) => ({ ...e, _date: new Date(e.date + "T00:00:00Z") }))
     .filter((e) => !Number.isNaN(e._date.getTime()) && e._date >= bugun && e._date <= until)
     .filter((e) => (PRIORITY_RANK[e.priority] ?? 0) >= minRank)
+    .filter((e) => {
+      const k = `${String(e.title || "").trim().toLowerCase()}|${e.date}`;
+      if (seenKeys.has(k)) return false;
+      seenKeys.add(k);
+      return true;
+    })
     .sort((a, b) => a._date - b._date)
     .map(({ _date, ...rest }) => rest);
 

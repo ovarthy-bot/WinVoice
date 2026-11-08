@@ -74,17 +74,37 @@ def _ensure_ollama_running():
         log.warning("'ollama serve' başlatılamadı (muhtemelen zaten çalışıyor veya kurulu değil): %s", e)
 
 
-def generate_daily_briefing(llm, prompt_template, location, time_str, news_items_text):
-    """main.py'deki generate_daily_briefing ile aynı mantık: Ollama henüz
-    hazır olmayabileceğinden (bağlantı reddedildi) birkaç kez yeniden
-    denenir; toplamda ~50 saniye şans verilir."""
+def generate_daily_briefing(llm, prompt_template, location, time_str, news_items_text, now_dt=None):
+    """main.py'deki generate_daily_briefing ile aynı mantık; Telegram yazılı
+    okuma için rakamların doğal kalmasına izin verir."""
+    import briefing_coordinator
+    from persona_settings import (
+        briefing_length_instruction,
+        briefing_time_context,
+        get_shift_override,
+        hitap_talimati,
+    )
+
+    now_dt = now_dt or datetime.now()
     espri_talimati, arkadaslik_talimati = current_persona_instructions()
+    t_ctx = briefing_time_context(now_dt.hour)
+    coord = briefing_coordinator.collect_personal_coordination_data(today=now_dt.date())
+    shift = briefing_coordinator.resolve_shift_for_date(now_dt.date(), get_shift_override())
+    focus_hint = coord.get("primary_focus") or shift["label"]
+
     prompt = prompt_template.format(
         location=location,
         time=time_str,
         news_items_text=news_items_text,
         espri_talimati=espri_talimati,
         arkadaslik_talimati=arkadaslik_talimati,
+        hitap_talimati=hitap_talimati(),
+        uzunluk_talimati=briefing_length_instruction(),
+        zaman_rol_tanimi=t_ctx["role_desc"],
+        selamlama_ifadesi=t_ctx["greeting"],
+        kapanis_ipucu=t_ctx["closing_hint"],
+        odak_ipucu=focus_hint,
+        rakam_kurali="Sayı ve yüzdeleri okunaklı ve doğal biçimde yazabilirsin.",
     )
     last_error = None
     for wait_seconds in (0, 3, 5, 8, 15, 20):
@@ -101,17 +121,7 @@ def build_briefing_text():
     log.info("Hava, piyasa ve haber verisi toplanıyor...")
     try:
         weather_raw = briefing_data.fetch_weather()
-        current = weather_raw["current"]
-        today_forecast = weather_raw["days"][0] if weather_raw["days"] else {}
-        desc, _emoji = briefing_data.WEATHER_CODES.get(current.get("weather_code"), ("Bilinmiyor", "❓"))
-        weather_data = {
-            "sicaklik_c": current.get("temperature_2m"),
-            "aciklama": desc,
-            "nem_yuzde": current.get("relative_humidity_2m"),
-            "ruzgar_kmh": current.get("wind_speed_10m"),
-            "bugun_max_c": today_forecast.get("tmax"),
-            "bugun_min_c": today_forecast.get("tmin"),
-        }
+        weather_data = briefing_data.extract_weather_for_briefing(weather_raw)
     except Exception as e:
         log.warning("Hava durumu alınamadı, brifing havasız devam edecek: %s", e)
         weather_data = {}
@@ -146,9 +156,11 @@ def build_briefing_text():
     time_str = f"{format_tr_date(now)} {now.strftime('%H:%M')}"
 
     log.info("LLM (%s) ile brifing metni üretiliyor...", get_llm_model())
-    llm_text = generate_daily_briefing(llm, prompt_template, LOCATION, time_str, news_items_text)
+    llm_text = generate_daily_briefing(llm, prompt_template, LOCATION, time_str, news_items_text, now_dt=now)
 
-    return briefing_text.assemble_final_briefing(llm_text, weather_data, finance_data, events)
+    return briefing_text.assemble_final_briefing(
+        llm_text, weather_data, finance_data, events, for_tts=False, today=now.date(), current_hour=now.hour,
+    )
 
 
 def main():

@@ -31,6 +31,7 @@ _DB_CATEGORY_LABELS = {
     "appointment": "Randevu",
     "shopping": "Alışveriş",
     "reminder": "Hatırlatma",
+    "task": "Görev",
     "general": "Genel Not",
 }
 

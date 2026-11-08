@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS notes (
     title TEXT NOT NULL,
     description TEXT,
     confidence TEXT NOT NULL,
+    priority TEXT NOT NULL DEFAULT 'normal',
     needs_review INTEGER NOT NULL DEFAULT 0,
     completed INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
@@ -47,8 +48,33 @@ CREATE TABLE IF NOT EXISTS reminders (
     notified_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS tasks (
+    note_id INTEGER PRIMARY KEY REFERENCES notes(id) ON DELETE CASCADE,
+    due_date TEXT,
+    context TEXT
+);
+
 CREATE TABLE IF NOT EXISTS general_notes (
     note_id INTEGER PRIMARY KEY REFERENCES notes(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS seen_news (
+    fingerprint TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    category TEXT,
+    shown_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS learning_progress (
+    word_key TEXT PRIMARY KEY,
+    word TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    box INTEGER NOT NULL DEFAULT 1,
+    next_review_date TEXT NOT NULL,
+    last_shown_date TEXT,
+    times_shown INTEGER NOT NULL DEFAULT 0,
+    times_known INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_notes_telegram_message_id ON notes(telegram_message_id);

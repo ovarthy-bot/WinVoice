@@ -198,9 +198,10 @@ def answer_db_query(user_text: str) -> str | None:
             return None
 
         reminders = _active_clean_notes(category="reminder")
+        tasks = _active_clean_notes(category="task")
         # Doğum günlerini ve periyodik ödeme takvim kayıtlarını "yapılacak iş"
         # listesinden ayır; onlar zaten takvim/ödeme sorgularında yer alıyor.
-        gorevler = [
+        gorevler = list(tasks) + [
             r for r in reminders
             if not any(
                 etiket in tr_lower(r.get("title") or "")

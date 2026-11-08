@@ -22,7 +22,8 @@ ISTANBUL_TZ = timezone(timedelta(hours=3))
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "notes.db")
 
-CATEGORIES = ("appointment", "shopping", "reminder", "general")
+CATEGORIES = ("appointment", "shopping", "reminder", "task", "general")
+VALID_PRIORITIES = ("high", "normal", "low")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS telegram_messages (
@@ -43,6 +44,7 @@ CREATE TABLE IF NOT EXISTS notes (
     title TEXT NOT NULL,
     description TEXT,
     confidence TEXT NOT NULL,
+    priority TEXT NOT NULL DEFAULT 'normal',
     needs_review INTEGER NOT NULL DEFAULT 0,
     completed INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
@@ -70,8 +72,33 @@ CREATE TABLE IF NOT EXISTS reminders (
     notified_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS tasks (
+    note_id INTEGER PRIMARY KEY REFERENCES notes(id) ON DELETE CASCADE,
+    due_date TEXT,
+    context TEXT
+);
+
 CREATE TABLE IF NOT EXISTS general_notes (
     note_id INTEGER PRIMARY KEY REFERENCES notes(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS seen_news (
+    fingerprint TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    category TEXT,
+    shown_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS learning_progress (
+    word_key TEXT PRIMARY KEY,
+    word TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    box INTEGER NOT NULL DEFAULT 1,
+    next_review_date TEXT NOT NULL,
+    last_shown_date TEXT,
+    times_shown INTEGER NOT NULL DEFAULT 0,
+    times_known INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
 );
 """
 
@@ -81,26 +108,41 @@ _CATEGORY_TABLES = {
     "appointment": ("appointments", ("appt_date", "appt_time", "location", "related_person")),
     "shopping": ("shopping_items", ("product_name", "quantity")),
     "reminder": ("reminders", ("remind_at", "repeat_frequency", "notified_at")),
+    "task": ("tasks", ("due_date", "context")),
     "general": ("general_notes", ()),
 }
+
+_migrated_paths = set()
 
 
 def now_istanbul_iso():
     return datetime.now(ISTANBUL_TZ).isoformat()
 
 
+def _ensure_schema_on_conn(conn):
+    conn.executescript(_SCHEMA)
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(notes)").fetchall()}
+    if "priority" not in cols:
+        conn.execute("ALTER TABLE notes ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal'")
+
+
 def _connect():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    if DB_PATH not in _migrated_paths:
+        _ensure_schema_on_conn(conn)
+        conn.commit()
+        _migrated_paths.add(DB_PATH)
     return conn
 
 
 def init_db():
-    """Tabloları (yoksa) oluşturur. Uygulama/servis başlarken bir kez
-    çağrılması yeterlidir; mevcut veritabanına dokunmaz."""
-    with _connect() as conn:
-        conn.executescript(_SCHEMA)
+    """Tabloları ve geriye dönük uyumlu şema göçlerini oluşturur. Uygulama/servis
+    başlarken çağrılabilir; mevcut veritabanındaki verileri korur."""
+    _migrated_paths.discard(DB_PATH)
+    with _connect():
+        pass
 
 
 # --------------------------------------------------------------------------- #
@@ -161,12 +203,15 @@ def mark_message_status(message_id, status, clarification_question=None):
 # --------------------------------------------------------------------------- #
 
 def insert_note(category, title, description, confidence, telegram_message_id=None,
-                 needs_review=False, extra=None):
+                 needs_review=False, extra=None, priority="normal"):
     """Yeni bir not oluşturur ve `category`'ye göre doğru alt tabloya
-    (appointments/shopping_items/reminders/general_notes) `extra` sözlüğündeki
+    (appointments/shopping_items/reminders/tasks/general_notes) `extra` sözlüğündeki
     alanları yazar. `extra`'da olmayan alanlar NULL kalır (asla tahmin edilmez)."""
     if category not in _CATEGORY_TABLES:
         raise ValueError(f"Bilinmeyen kategori: {category!r}")
+    prio = str(priority or "normal").strip().lower()
+    if prio not in VALID_PRIORITIES:
+        prio = "normal"
     extra = extra or {}
     table_name, columns = _CATEGORY_TABLES[category]
     now = now_istanbul_iso()
@@ -174,9 +219,9 @@ def insert_note(category, title, description, confidence, telegram_message_id=No
     with _connect() as conn:
         cur = conn.execute(
             "INSERT INTO notes "
-            "(telegram_message_id, category, title, description, confidence, needs_review, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (telegram_message_id, category, title, description, confidence,
+            "(telegram_message_id, category, title, description, confidence, priority, needs_review, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (telegram_message_id, category, title, description, confidence, prio,
              1 if needs_review else 0, now, now),
         )
         note_id = cur.lastrowid
@@ -198,11 +243,13 @@ _NOTES_SELECT = """
     SELECT n.*,
            a.appt_date, a.appt_time, a.location, a.related_person,
            s.product_name, s.quantity,
-           r.remind_at, r.repeat_frequency, r.notified_at
+           r.remind_at, r.repeat_frequency, r.notified_at,
+           t.due_date, t.context
     FROM notes n
     LEFT JOIN appointments a ON a.note_id = n.id
     LEFT JOIN shopping_items s ON s.note_id = n.id
     LEFT JOIN reminders r ON r.note_id = n.id
+    LEFT JOIN tasks t ON t.note_id = n.id
 """
 
 _SORT_COLUMNS = {
@@ -375,3 +422,163 @@ def mark_reminder_notified(note_id, notified_at=None):
             "UPDATE reminders SET notified_at = ? WHERE note_id = ?",
             (notified_at, note_id),
         )
+
+
+# --------------------------------------------------------------------------- #
+# seen_news (Kişisel Haber Motoru tekrar engelleme hafızası)
+# --------------------------------------------------------------------------- #
+
+def get_seen_news_fingerprints(days=7):
+    """Son `days` gün içinde brifingde gösterilmiş haber parmak izlerini döner."""
+    cutoff = (datetime.now(ISTANBUL_TZ) - timedelta(days=days)).isoformat()
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT fingerprint FROM seen_news WHERE shown_at >= ?",
+            (cutoff,),
+        ).fetchall()
+        return {row["fingerprint"] for row in rows}
+
+
+def mark_news_seen(items):
+    """Brifinge seçilen haberlerin parmak izlerini kaydeder ve 14 günden eski
+    kayıtları otomatik temizler."""
+    if not items:
+        return
+    now_iso = now_istanbul_iso()
+    prune_cutoff = (datetime.now(ISTANBUL_TZ) - timedelta(days=14)).isoformat()
+    with _connect() as conn:
+        conn.execute("DELETE FROM seen_news WHERE shown_at < ?", (prune_cutoff,))
+        for it in items:
+            fp = (it.get("fingerprint") or "").strip()
+            title = (it.get("title") or "").strip()
+            cat = (it.get("category") or "").strip()
+            if not fp or not title:
+                continue
+            conn.execute(
+                "INSERT INTO seen_news (fingerprint, title, category, shown_at) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(fingerprint) DO UPDATE SET shown_at = excluded.shown_at",
+                (fp, title, cat, now_iso),
+            )
+
+
+# --------------------------------------------------------------------------- #
+# learning_progress (Aralıklı Tekrar / Leitner İngilizce Kartları)
+# --------------------------------------------------------------------------- #
+
+LEITNER_INTERVAL_DAYS = {1: 1, 2: 3, 3: 7, 4: 15, 5: 30}
+
+
+def get_learning_progress_map():
+    with _connect() as conn:
+        rows = conn.execute("SELECT * FROM learning_progress").fetchall()
+        return {row["word_key"]: dict(row) for row in rows}
+
+
+def record_learning_card_shown(word_key, word, domain, today_iso):
+    """Günün kartı seçildiğinde çağrılır. Aynı gün içinde tekrar çağrılırsa
+    sayacı iki kez artırmaz."""
+    now_iso = now_istanbul_iso()
+    with _connect() as conn:
+        existing = conn.execute(
+            "SELECT * FROM learning_progress WHERE word_key = ?",
+            (word_key,),
+        ).fetchone()
+        if existing:
+            if existing["last_shown_date"] == today_iso:
+                return dict(existing)
+            box = int(existing["box"] or 1)
+            interval = LEITNER_INTERVAL_DAYS.get(box, 3)
+            next_due = (datetime.strptime(today_iso, "%Y-%m-%d").date() + timedelta(days=interval)).isoformat()
+            conn.execute(
+                "UPDATE learning_progress SET last_shown_date = ?, next_review_date = ?, "
+                "times_shown = times_shown + 1, updated_at = ? WHERE word_key = ?",
+                (today_iso, next_due, now_iso, word_key),
+            )
+        else:
+            next_due = (datetime.strptime(today_iso, "%Y-%m-%d").date() + timedelta(days=2)).isoformat()
+            conn.execute(
+                "INSERT INTO learning_progress "
+                "(word_key, word, domain, box, next_review_date, last_shown_date, times_shown, times_known, updated_at) "
+                "VALUES (?, ?, ?, 1, ?, ?, 1, 0, ?)",
+                (word_key, word, domain, next_due, today_iso, now_iso),
+            )
+        row = conn.execute("SELECT * FROM learning_progress WHERE word_key = ?", (word_key,)).fetchone()
+        return dict(row) if row else None
+
+
+def record_learning_feedback(word_key, word, domain, known, today_iso=None):
+    """Kullanıcı kart için 'Öğrendim' (known=True) veya 'Tekrar Sor' (known=False)
+    geri bildirimi verdiğinde Leitner kutusunu ve bir sonraki tekrar gününü günceller."""
+    today_iso = today_iso or datetime.now(ISTANBUL_TZ).strftime("%Y-%m-%d")
+    today_d = datetime.strptime(today_iso, "%Y-%m-%d").date()
+    now_iso = now_istanbul_iso()
+
+    with _connect() as conn:
+        existing = conn.execute(
+            "SELECT * FROM learning_progress WHERE word_key = ?",
+            (word_key,),
+        ).fetchone()
+        cur_box = int(existing["box"]) if existing else 1
+        new_box = min(5, cur_box + 1) if known else 1
+        interval = LEITNER_INTERVAL_DAYS.get(new_box, 1)
+        next_due = (today_d + timedelta(days=interval)).isoformat()
+
+        if existing:
+            conn.execute(
+                "UPDATE learning_progress SET box = ?, next_review_date = ?, "
+                "times_known = times_known + ?, updated_at = ? WHERE word_key = ?",
+                (new_box, next_due, 1 if known else 0, now_iso, word_key),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO learning_progress "
+                "(word_key, word, domain, box, next_review_date, last_shown_date, times_shown, times_known, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)",
+                (word_key, word, domain, new_box, next_due, today_iso, 1 if known else 0, now_iso),
+            )
+        return {"word_key": word_key, "box": new_box, "interval_days": interval, "next_review_date": next_due}
+
+
+def sync_learning_progress_from_cloud(cloud_rows):
+    """Buluttaki (D1) learning_progress kayıtlarını yerel notes.db ile eşitler.
+    Yalnızca buluttaki `updated_at` zaman damgası yerelden daha yeniyse günceller."""
+    if not cloud_rows:
+        return 0
+    updated = 0
+    with _connect() as conn:
+        for row in cloud_rows:
+            word_key = (row.get("word_key") or "").strip()
+            word = (row.get("word") or "").strip()
+            if not word_key or not word:
+                continue
+            cloud_updated = row.get("updated_at") or ""
+            local_row = conn.execute(
+                "SELECT updated_at FROM learning_progress WHERE word_key = ?",
+                (word_key,),
+            ).fetchone()
+            if local_row and (local_row["updated_at"] or "") >= cloud_updated:
+                continue
+            conn.execute(
+                "INSERT INTO learning_progress "
+                "(word_key, word, domain, box, next_review_date, last_shown_date, times_shown, times_known, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(word_key) DO UPDATE SET "
+                "word = excluded.word, domain = excluded.domain, box = excluded.box, "
+                "next_review_date = excluded.next_review_date, last_shown_date = excluded.last_shown_date, "
+                "times_shown = excluded.times_shown, times_known = excluded.times_known, "
+                "updated_at = excluded.updated_at",
+                (
+                    word_key,
+                    word,
+                    row.get("domain") or "daily",
+                    int(row.get("box") or 1),
+                    row.get("next_review_date") or "1970-01-01",
+                    row.get("last_shown_date"),
+                    int(row.get("times_shown") or 0),
+                    int(row.get("times_known") or 0),
+                    cloud_updated or now_istanbul_iso(),
+                ),
+            )
+            updated += 1
+    return updated

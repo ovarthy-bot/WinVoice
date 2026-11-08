@@ -119,6 +119,7 @@ if __name__ == "__main__" or sys.stderr is None:
 
 import re
 import subprocess
+from datetime import datetime
 # worker_threads, PyQt5'ten ÖNCE import edilmeli: faster-whisper'ın native
 # kütüphaneleri (ctranslate2/onnxruntime) PyQt5 yüklendikten sonra Whisper
 # modeli oluşturulursa Windows'ta DLL çakışmasından çöküyor (access violation).
@@ -185,18 +186,43 @@ vault_elapsed_days_prompt_template = PromptTemplate.from_template(VAULT_ELAPSED_
 
 
 def generate_daily_briefing(location: str, time_str: str, news_items_text: str) -> str:
-    """Günlük Dashboard'daki "Günlük Brifing" kartı için Giriş/Türkiye/Dünya/
-    Teknoloji/Kapanış bölümlerini üretir. Hava & Piyasa bölümü LLM'e hiç
-    verilmez — dashboard_ui.py tarafında tamamen deterministik olarak
-    kurulup bu metnin içine eklenir (küçük yerel modelin rakamları
-    güvenilir şekilde seslendiremediği görüldüğü için)."""
+    """Günlük Dashboard'daki "Günlük Brifing" kartı için Giriş / Seçilmiş Gündem /
+    Odaklı Kapanış iskeletini üretir. Görevler, Vardiya, Saatlik Hava, Piyasa ve
+    İngilizce kartı LLM dışında deterministik olarak eklenir."""
+    import briefing_coordinator
+    from persona_settings import (
+        briefing_length_instruction,
+        briefing_time_context,
+        get_shift_override,
+        hitap_talimati,
+    )
+
+    now_dt = datetime.now()
     espri_talimati, arkadaslik_talimati = current_persona_instructions()
+    t_ctx = briefing_time_context(now_dt.hour)
+    coord = briefing_coordinator.collect_personal_coordination_data(today=now_dt.date())
+    shift = briefing_coordinator.resolve_shift_for_date(now_dt.date(), get_shift_override())
+    focus_hint = coord.get("primary_focus") or shift["spoken_label"]
+
+    rakam_kurali = (
+        "Metin sesli okunacağı için haberlerden aktardığın tüm rakam, fiyat ve yüzdeleri "
+        "Türkçe yazıyla yaz (ör. '777' yerine 'yedi yüz yetmiş yedi', '%2' yerine 'yüzde iki'); "
+        "çıktıda 0-9 rakamı veya %, $, ₺ sembolü yer almamalı."
+    )
+
     prompt = briefing_prompt_template.format(
         location=location,
         time=time_str,
         news_items_text=news_items_text,
         espri_talimati=espri_talimati,
         arkadaslik_talimati=arkadaslik_talimati,
+        hitap_talimati=hitap_talimati(),
+        uzunluk_talimati=briefing_length_instruction(),
+        zaman_rol_tanimi=t_ctx["role_desc"],
+        selamlama_ifadesi=t_ctx["greeting"],
+        kapanis_ipucu=t_ctx["closing_hint"],
+        odak_ipucu=focus_hint,
+        rakam_kurali=rakam_kurali,
     )
     # Ollama uygulaması WinVoice ile (örn. baslat.bat ile) hemen hemen aynı
     # anda başlatılmış olabilir ve modeli yüklemesi birkaç saniye sürebilir.

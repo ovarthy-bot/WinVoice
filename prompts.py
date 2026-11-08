@@ -58,71 +58,45 @@ SOHBET: Hava durumunu şu an kontrol edemiyorum ama isterseniz sizin için taray
 Kullanıcı: "{user_input}"
 Cevap:"""
 
-# Günlük Dashboard'daki "Günlük Brifing" kartı için: toplanan hava durumu,
-# piyasa ve ham haber verilerini tek, akıcı, TTS'e uygun bir brifing
-# metnine dönüştürür.
+# Günlük Dashboard'daki "Günlük Brifing" kartı ve Telegram brifingi için:
+# seçilmiş kişisel gündemi zamana duyarlı (Sabah/Gün İçi/Akşam) bir üslupla
+# giriş + gündem + odaklı kapanış iskeletine dönüştürür.
 DAILY_BRIEFING_PROMPT = r"""
-Sen kişisel bir sesli asistansın. Kullanıcıya gün sonu sesli brifingi hazırlayacaksın.
+Sen kişisel bir yaşam koordinatörü asistansın. {zaman_rol_tanimi}
 
 GİRDİLER:
 - Kullanıcı Konumu ve Saat: {location}, {time}
-- Ham Haber Akışı (bazı başlıklar İngilizce olabilir): {news_items_text}
+- Bugünün Somut Odağı (kapanış cümlesi için ipucu): {odak_ipucu}
+- Önceliklendirilmiş Seçilmiş Haber Akışı (bazı başlıklar İngilizce olabilir):
+{news_items_text}
 
-ÖNEMLİ — Hava durumu ve piyasa (dolar, altın, BIST, Bitcoin) bilgisi SANA
-VERİLMİYOR ve bu yüzden onlardan HİÇ bahsetmeyeceksin. "Hava & Piyasa" bölümü
-tamamen senin çıktının dışında, ayrıca ve zaten doğru şekilde seslendirilmiş
-olarak otomatik eklenecek. Sakın hava durumu, sıcaklık, dolar, altın, BIST
-veya Bitcoin ile ilgili tek bir kelime bile yazma — bu konuda elindeki tek
-bilgi bu paragraftır, başka hiçbir veri yok.
+ÖNEMLİ — Hava durumu, piyasa, kişisel görevler, vardiya ve İngilizce kartı bölümleri
+SANA VERİLMİYOR ve senin çıktının arasına deterministik olarak kod tarafından eklenecek.
+Sakın hava durumu, sıcaklık, dolar, altın, BIST, Bitcoin, vardiya saati veya uydurma bir
+görev hakkında tek bir kelime bile yazma.
 
 KURALLAR:
-1. SESLENDİRME (TTS) UYUMLULUĞU: Metin sesli okunacağı için ham haber akışından
-   aktardığın bilgilerdeki RAKAM, FİYAT VE YÜZDELERİ YAZIYLA YAZ (haberlerde geçen
-   tarih/sayı/para birimi gibi değerler dahil). Çıktıda hiçbir rakam (0-9) veya
-   sembol (%, ₺, $, TL) ham haliyle YER ALMAMALI.
-   - Örnek: "49.61 TL" yerine "kırk dokuz lira altmış bir kuruş"
-   - Örnek: "%1.5" yerine "yüzde bir virgül beş"
-   - Örnek: "6588" yerine "altı bin beş yüz seksen sekiz"
-2. TIK TUZAĞI (CLICKBAIT) FİLTRESİ: Ham haber akışı zaten önceden filtrelenmiştir, ama
-   yine de belirsizlik içeren veya gerçek bir bilgi taşımayan başlıklar varsa bunları
-   da ele. Yalnızca net bilgi içeren haberleri seç; her bölüm için aşağıda belirtilen
-   sayıya uy.
-3. DİL: Nihai çıktının TAMAMI Türkçe olmalı. İngilizce bir haber başlığı/özeti
-   görürsen onu kendi cümlelerinle Türkçeye çevirerek anlat; İngilizce tek kelime
-   bile bırakma (özel isimler/şirket adları hariç).
-4. PERSONA & TON: Dashboard > Ayarlar sayfasındaki yüzde kaydırıcılarından gelen şu
-   kişilik talimatlarına uy:
+1. SAYI VE SEMBOLLER: {rakam_kurali}
+2. DİL VE HABER SEÇİMİ: Nihai çıktının TAMAMI akıcı, doğal Türkçe olmalı. İngilizce
+   başlıkları (ör. Airbus, Boeing, yapay zeka veya yazılım haberlerini) doğal Türkçeye
+   çevirerek özetle; şirket/model/özel isimler dışında İngilizce kelime bırakma.
+   {uzunluk_talimati}
+3. PERSONA VE HİTAP:
+   - Hitap kuralı: {hitap_talimati}
    - Espri: {espri_talimati}
    - Arkadaş canlısı yaklaşım: {arkadaslik_talimati}
-   Kullanıcıya doğrudan "Patron" diye hitap et (örn. "Patron, piyasalarda bugün...").
-   "Patron" kelimesi metin boyunca en az iki kez geçmeli.
-   - ZAMANA UYGUN SELAMLAMA: Girdideki {time} değerinden saati belirle ve selamlamada
-     SADECE o saat aralığına uyan ifadeyi kullan — asla sabit olarak "Günaydın" yazma:
-       * 05:00–11:59 arası: "Günaydın"
-       * 12:00–17:59 arası: "Tünaydın"
-       * 18:00–21:59 arası: "İyi akşamlar"
-       * 22:00–04:59 arası: "İyi geceler"
-5. İÇERİK AKIŞI: Aşağıdaki sırayla ve içerikle TEK, akıcı bir metin kur. Bu başlıkları
-   (Giriş:, Hava & Piyasa: vb.) çıktıya YAZMA — bunlar sadece senin iç kurgun için bir
-   sıralama rehberidir:
-   - Giriş: Yukarıdaki ZAMANA UYGUN SELAMLAMA kuralına göre seçtiğin selamlama
-     ifadesiyle başlayan, "Patron" hitabı içeren hafif espritüel bir selamlama.
-     SADECE selamla; hava durumu veya piyasadan hiç bahsetme (bkz. yukarıdaki ÖNEMLİ not).
-   - Türkiye Gündemi: Ham haber akışındaki "TÜRKİYE" etiketli haberlerden en önemli
-     2-3 gelişmenin 1'er cümlelik özeti.
-   - Dünya Turu: Ham haber akışındaki "DÜNYA" etiketli haberlerden çarpıcı 2 gelişme.
-   - Teknoloji: Ham haber akışındaki "TEKNOLOJİ" etiketli haberlerden yapay zeka veya
-     teknoloji dünyasından 1-2 gelişme.
-   - Kapanış: Zamana uygun, espritüel bir kapanış cümlesi. {time} değerindeki saate göre:
-       * Öğleden sonra (12:00–17:59): "Günün ikinci yarısı bizi bekliyor, kolay gelsin
-         Patron." benzeri enerji verici bir ifade kullan.
-       * Gece (22:00–04:59): "Vücudunu artık dinlendirmelisin, geç oldu Patron."
-         benzeri dinlenmeyi hatırlatan bir ifade kullan.
-       * Diğer saatlerde (sabah/akşam) duruma uygun, benzer ruhta espritüel bir
-         kapanış cümlesi üret.
-6. ÇIKTI FORMATI: Sadece seslendirilecek düz metni yaz. Başlık, madde işareti,
-   markdown, emoji veya açıklama ekleme. Bölümler arasında birer boş satır
-   bırakarak doğal duraklama noktaları oluştur.
+   - Selamlama ifadesi olarak "{selamlama_ifadesi}" ile başla.
+4. İÇERİK AKIŞI (Aralarında birer boş satır bırakarak TAM OLARAK 3 bölüm yaz; bölüm
+   başlıklarını çıktıya ASLA yazma):
+   - 1. Paragraf (Giriş): "{selamlama_ifadesi}" ile başlayan, hitap kuralına uyan tek
+     cümlelik kısa ve doğal bir açılış.
+   - 2. Paragraf (Seçilmiş Gündem): Yukarıdaki önceliklendirilmiş haberleri (Havacılık,
+     Yapay Zeka/Yazılım ve Türkiye/Dünya gündemi) tekrar etmeden, tek veya en fazla iki
+     akıcı paragrafta özetle.
+   - Son Paragraf (Odaklı Kapanış): Basmakalıp motivasyon sözleri yerine "{odak_ipucu}"
+     odağına atıf yapan {kapanis_ipucu}
+5. ÇIKTI FORMATI: Başlık, madde işareti, markdown veya emoji ekleme; bölümler arasında
+   yalnızca birer boş satır bırak.
 
 Brifing:"""
 
@@ -225,14 +199,17 @@ KURALLAR:
    Tek bir konu/bilgiyse dizide tek eleman olur.
 2. Her nesnede şu alanlar MUTLAKA bulunur:
    - "kategori": SADECE "appointment" (randevu/buluşma/teslim tarihi),
-     "shopping" (satın alınacak ürün), "reminder" (genel hatırlatma/yapılacak
-     iş, bir tarihe/saate bağlı olsun ya da olmasın), "general" (hiçbirine
-     net uymayan not) veya "query" (kullanıcı bir BİLGİ SORUYOR ya da notlarından
-     bir şey hatırlamak istiyor; ör. "ne zaman...?", "kaç gün geçti?", "var mı?")
-     değerlerinden biri. "query" ise not KAYDEDİLMEZ; sorunun kendisi "açıklama"ya yazılır.
+     "shopping" (satın alınacak ürün), "task" (somut yapılacak iş/aksiyon/tamir/başvuru,
+     ör. "banyodaki askıyı sök", "eğitim kaydını tamamla"), "reminder" (belirli bir
+     zamanda/periyotta hatırlatılacak konu), "general" (aksiyon gerektirmeyen bilgi/fikir/referans
+     notu) veya "query" (kullanıcı bir BİLGİ SORUYOR ya da notlarından bir şey hatırlamak
+     istiyor; ör. "ne zaman...?", "kaç gün geçti?", "var mı?") değerlerinden biri.
+     "query" ise not KAYDEDİLMEZ; sorunun kendisi "açıklama"ya yazılır.
    - "güven": "high" (kategori ve ana bilgi açık/net), "medium" (kategori
      muhtemel ama bazı alanlar belirsiz) veya "low" (mesaj çok belirsiz,
      kategori veya niyet net değil) değerlerinden biri.
+   - "öncelik": mesajda "acil", "çok önemli", "mutlaka", "hemen" gibi bir vurgu varsa "high",
+     "acelesi yok", "boş vakitte" varsa "low", aksi halde "normal".
    - "başlık": kısa (en fazla ~60 karakter), notu özetleyen bir başlık.
    - "açıklama": mesajın ilgili kısmının kendisi veya kısa bir özeti.
 3. Kategoriye göre, mesajda AÇIKÇA belirtilmişse şu ek alanları da doldur;
@@ -240,6 +217,8 @@ KURALLAR:
    - appointment: "tarih" ("YYYY-MM-DD" biçiminde), "saat", "konum",
      "ilgili_kisi".
    - shopping: "urun_adi", "urun_miktari".
+   - task: "son_tarih" (açık tarih varsa "YYYY-MM-DD" biçiminde, yoksa null),
+     "baglam" ("ev", "iş", "proje", "kişisel" vb., belirtilmemişse null).
    - reminder: "hatirlatma_zamani" (mesajda açık bir tarih varsa
      "YYYY-MM-DDTHH:MM" biçiminde; saat belirtilmemişse "09:00" kullan),
      "tekrar_sikligi" (ör. "yok", "gunluk", "haftalik", "aylik", "yillik";
@@ -263,22 +242,25 @@ KURALLAR:
 ÖRNEKLER:
 
 Mesaj: "02.11.2026 tarihinde galley aparatını teslim etmem gerekiyor."
-JSON: [{{"kategori": "appointment", "güven": "high", "başlık": "Galley aparatı teslimi", "açıklama": "02.11.2026 tarihinde galley aparatını teslim etmem gerekiyor.", "tarih": "2026-11-02", "saat": null, "konum": null, "ilgili_kisi": null}}]
+JSON: [{{"kategori": "appointment", "güven": "high", "öncelik": "normal", "başlık": "Galley aparatı teslimi", "açıklama": "02.11.2026 tarihinde galley aparatını teslim etmem gerekiyor.", "tarih": "2026-11-02", "saat": null, "konum": null, "ilgili_kisi": null}}]
 
 Mesaj: "Annem için perma tarağı satın al"
-JSON: [{{"kategori": "shopping", "güven": "high", "başlık": "Annem için perma tarağı", "açıklama": "Annem için perma tarağı satın alınacak.", "urun_adi": "perma tarağı", "urun_miktari": null}}]
+JSON: [{{"kategori": "shopping", "güven": "high", "öncelik": "normal", "başlık": "Annem için perma tarağı", "açıklama": "Annem için perma tarağı satın alınacak.", "urun_adi": "perma tarağı", "urun_miktari": null}}]
+
+Mesaj: "Banyodaki askıyı acil söküp yerine sensörlü lamba takmam lazım"
+JSON: [{{"kategori": "task", "güven": "high", "öncelik": "high", "başlık": "Banyodaki askıyı söküp lamba tak", "açıklama": "Banyodaki askı sökülüp yerine sensörlü lamba takılacak.", "son_tarih": null, "baglam": "ev"}}]
 
 Mesaj: "yarın süt alacağım, cuma arabayı yıkatacağım, cumartesi Ahmet'le görüşeceğim"
-JSON: [{{"kategori": "shopping", "güven": "high", "başlık": "Süt al", "açıklama": "Yarın süt alınacak.", "urun_adi": "süt", "urun_miktari": null}}, {{"kategori": "reminder", "güven": "medium", "başlık": "Araba yıkama", "açıklama": "Cuma günü araba yıkatılacak.", "hatirlatma_zamani": "cuma", "tekrar_sikligi": "yok"}}, {{"kategori": "appointment", "güven": "high", "başlık": "Ahmet ile görüşme", "açıklama": "Cumartesi Ahmet'le görüşülecek.", "tarih": "cumartesi", "saat": null, "konum": null, "ilgili_kisi": "Ahmet"}}]
+JSON: [{{"kategori": "shopping", "güven": "high", "öncelik": "normal", "başlık": "Süt al", "açıklama": "Yarın süt alınacak.", "urun_adi": "süt", "urun_miktari": null}}, {{"kategori": "task", "güven": "medium", "öncelik": "normal", "başlık": "Araba yıkama", "açıklama": "Cuma günü araba yıkatılacak.", "son_tarih": "cuma", "baglam": "kişisel"}}, {{"kategori": "appointment", "güven": "high", "öncelik": "normal", "başlık": "Ahmet ile görüşme", "açıklama": "Cumartesi Ahmet'le görüşülecek.", "tarih": "cumartesi", "saat": null, "konum": null, "ilgili_kisi": "Ahmet"}}]
 
 Mesaj: "bir şeyler var ya neyse"
-JSON: [{{"kategori": "general", "güven": "low", "başlık": "Belirsiz not", "açıklama": "bir şeyler var ya neyse"}}]
+JSON: [{{"kategori": "general", "güven": "low", "öncelik": "normal", "başlık": "Belirsiz not", "açıklama": "bir şeyler var ya neyse"}}]
 
 Mesaj: "Örnek hatırlatma notum 03.11.2026 tarihinde saat 12:00'ye ekle."
-JSON: [{{"kategori": "reminder", "güven": "high", "başlık": "Örnek hatırlatma", "açıklama": "Örnek hatırlatma notu.", "hatirlatma_zamani": "2026-11-03T12:00", "tekrar_sikligi": "yok"}}]
+JSON: [{{"kategori": "reminder", "güven": "high", "öncelik": "normal", "başlık": "Örnek hatırlatma", "açıklama": "Örnek hatırlatma notu.", "hatirlatma_zamani": "2026-11-03T12:00", "tekrar_sikligi": "yok"}}]
 
 Mesaj: "Askere ne zaman gittim?"
-JSON: [{{"kategori": "query", "güven": "high", "başlık": "Askere gitme tarihi sorusu", "açıklama": "Askere ne zaman gittim?"}}]
+JSON: [{{"kategori": "query", "güven": "high", "öncelik": "normal", "başlık": "Askere gitme tarihi sorusu", "açıklama": "Askere ne zaman gittim?"}}]
 
 ---
 

@@ -374,11 +374,9 @@ def _compute_supermoons(today=None, within_days=60):
 # Toplayıcı
 # --------------------------------------------------------------------------- #
 
-def get_prioritized_events(min_priority="high", within_days=14, today=None, tmdb_api_key=None, football_api_key=None):
+def get_prioritized_events(min_priority="high", within_days=7, today=None, tmdb_api_key=None, football_api_key=None):
     """Tüm kaynakları toplar, `within_days` penceresine ve `min_priority`
-    eşiğine göre filtreler, tarihe göre sıralı döner. Her kaynak kendi
-    try/except'i içinde çalıştığı için bir kaynağın hatası diğerlerini ya da
-    bu fonksiyonun kendisini asla düşürmez."""
+    eşiğine göre filtreler, tekilleştirip tarihe göre sıralı döner."""
     bugun = _today(today)
     bitis = bugun + timedelta(days=within_days)
 
@@ -401,6 +399,7 @@ def get_prioritized_events(min_priority="high", within_days=14, today=None, tmdb
     min_rank = priority_rank.get(min_priority, 2)
 
     filtered = []
+    seen_keys = set()
     for e in all_events:
         try:
             event_date = datetime.strptime(e["date"], "%Y-%m-%d").date()
@@ -410,6 +409,10 @@ def get_prioritized_events(min_priority="high", within_days=14, today=None, tmdb
             continue
         if priority_rank.get(e.get("priority"), 0) < min_rank:
             continue
+        dedupe_key = (e.get("title", "").strip().lower(), e["date"])
+        if dedupe_key in seen_keys:
+            continue
+        seen_keys.add(dedupe_key)
         filtered.append({**e, "_date": event_date})
 
     filtered.sort(key=lambda e: e["_date"])

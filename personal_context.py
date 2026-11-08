@@ -207,6 +207,18 @@ def _db_note_to_calendar_entry(n):
             "not": desc,
         }
 
+    if cat == "task":
+        tarih_raw = (n.get("due_date") or "").strip()
+        if not tarih_raw or tr_lower(tarih_raw) == "yok":
+            return None
+        return {
+            "tur": "Görev",
+            "kim": title or "Görev",
+            "tarih_raw": tarih_raw,
+            "tekrar": "",
+            "not": desc,
+        }
+
     return None
 
 

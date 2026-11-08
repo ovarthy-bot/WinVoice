@@ -89,6 +89,7 @@ def _save_items(llm, chat_id, items, telegram_message_id, allow_clarification):
             telegram_message_id=telegram_message_id,
             needs_review=needs_review,
             extra=item["extra"],
+            priority=item.get("priority", "normal"),
         )
         saved_note = note_database.get_note(note_id)
         notification_service.notify_note_saved(chat_id, saved_note)

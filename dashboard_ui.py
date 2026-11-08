@@ -27,6 +27,10 @@ from worker_threads import (
 )
 from persona_settings import (
     get_espri_pct, set_espri_pct, get_arkadaslik_pct, set_arkadaslik_pct,
+    get_hitap_sekli, set_hitap_sekli,
+    get_briefing_length_mode, set_briefing_length_mode,
+    get_briefing_finance_mode, set_briefing_finance_mode,
+    get_learning_card_enabled, set_learning_card_enabled,
 )
 from llm_settings import AVAILABLE_LLM_MODELS, get_llm_model
 import briefing_data
@@ -844,6 +848,7 @@ class DailyDashboardWindow(QWidget):
     # ------------------------------------------------------------------- #
     _NOTES_CATEGORY_META = {
         "all": ("Tümü", "🗂️"),
+        "task": ("Görevler", "✅"),
         "appointment": ("Randevular", "📅"),
         "shopping": ("Alışveriş", "🛒"),
         "reminder": ("Hatırlatmalar", "⏰"),
@@ -1004,7 +1009,9 @@ class DailyDashboardWindow(QWidget):
             title_lbl.setStyleSheet("font-size: 13px; font-weight: 600; color: #64748B; text-decoration: line-through;")
         desc = (note.get("description") or "").strip()
         meta_bits = [label]
-        for key in ("appt_date", "remind_at", "product_name"):
+        if note.get("priority") == "high":
+            meta_bits.append("🔴 Yüksek Öncelik")
+        for key in ("appt_date", "due_date", "remind_at", "product_name"):
             if note.get(key):
                 meta_bits.append(str(note[key]))
         subtitle_lbl = QLabel(" · ".join(meta_bits) + (f"\n{desc}" if desc else ""))
@@ -1061,7 +1068,7 @@ class DailyDashboardWindow(QWidget):
         title_edit = QLineEdit(note["title"])
         desc_edit = QLineEdit(note.get("description") or "")
         category_combo = QComboBox()
-        for key in ("appointment", "shopping", "reminder", "general"):
+        for key in ("task", "appointment", "shopping", "reminder", "general"):
             category_combo.addItem(self._NOTES_CATEGORY_META[key][0], key)
         current_index = category_combo.findData(note["category"])
         if current_index >= 0:
@@ -1207,6 +1214,46 @@ class DailyDashboardWindow(QWidget):
 
         return row
 
+    def _push_config_async(self):
+        threading.Thread(target=cloud_sync.push_config, daemon=True).start()
+
+    def _build_persona_combo_row(self, emoji, title, subtitle, options, current_val, setter):
+        row = QHBoxLayout()
+        row.setSpacing(12)
+        row.addWidget(IconBadge(emoji, bg_color="rgba(245, 158, 11, 25)", fg_color=ACCENT, size=34, font_size=15, radius=9))
+        txt_box = QVBoxLayout()
+        txt_box.setSpacing(1)
+        lbl1 = QLabel(title)
+        lbl1.setStyleSheet("font-size: 13px; font-weight: 600; color: #E5E7EB;")
+        lbl2 = QLabel(subtitle)
+        lbl2.setStyleSheet("font-size: 11px; color: #8592A6;")
+        txt_box.addWidget(lbl1)
+        txt_box.addWidget(lbl2)
+        row.addLayout(txt_box, stretch=1)
+
+        combo = QComboBox()
+        combo.setFixedWidth(240)
+        combo.setStyleSheet("""
+            QComboBox { background-color: rgba(255,255,255,14); color: #F1F5F9;
+                        border: 1px solid rgba(255,255,255,22); border-radius: 8px;
+                        padding: 5px 10px; font-size: 12px; }
+            QComboBox QAbstractItemView { background-color: #1F1A14; color: #F1F5F9;
+                                          selection-background-color: #D97706; }
+        """)
+        for label_text, data_val in options:
+            combo.addItem(label_text, data_val)
+        idx = combo.findData(current_val)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+
+        def _on_changed(new_idx):
+            setter(combo.itemData(new_idx))
+            self._push_config_async()
+
+        combo.currentIndexChanged.connect(_on_changed)
+        row.addWidget(combo)
+        return row
+
     def _build_persona_settings_card(self):
         card = self._card_frame()
         card_layout = QVBoxLayout(card)
@@ -1217,9 +1264,9 @@ class DailyDashboardWindow(QWidget):
         header.addWidget(IconBadge("🎭", bg_color="transparent", fg_color=ACCENT, size=28, font_size=18))
         header_text = QVBoxLayout()
         header_text.setSpacing(0)
-        t1 = QLabel("Kişilik")
+        t1 = QLabel("Kişilik ve Günlük Brifing Koordinatörü")
         t1.setStyleSheet("font-size: 15px; font-weight: 600; color: #F1F5F9;")
-        t2 = QLabel("Asistanın sohbet ve brifing sırasındaki üslubunu ayarlayın")
+        t2 = QLabel("Hitap şekli, brifing yoğunluğu, piyasa filtresi ve üslup ayarları")
         t2.setStyleSheet("font-size: 11px; color: #8592A6;")
         header_text.addWidget(t1)
         header_text.addWidget(t2)
@@ -1231,12 +1278,46 @@ class DailyDashboardWindow(QWidget):
 
         card_layout.addLayout(self._build_persona_slider_row(
             "😄", "Espri", "Mizahın sıklığı ve yoğunluğu.",
-            get_espri_pct(), set_espri_pct,
+            get_espri_pct(), lambda v: (set_espri_pct(v), self._push_config_async()),
         ))
         card_layout.addLayout(self._build_persona_slider_row(
             "🤝", "Arkadaş canlısı yaklaşım", "İletişimin sıcaklığı.",
-            get_arkadaslik_pct(), set_arkadaslik_pct,
+            get_arkadaslik_pct(), lambda v: (set_arkadaslik_pct(v), self._push_config_async()),
         ))
+        card_layout.addWidget(Divider())
+
+        card_layout.addLayout(self._build_persona_combo_row(
+            "🗣️", "Hitap şekli", "Brifing ve sohbette tercih edilen hitap.",
+            [("İsimle (Onur)", "onur"), ("Patron", "patron"), ("Hitapsız (Doğrudan)", "hitapsiz")],
+            get_hitap_sekli(), set_hitap_sekli,
+        ))
+        card_layout.addLayout(self._build_persona_combo_row(
+            "⏱️", "Brifing uzunluğu", "Sabah akışının kapsam ve detay seviyesi.",
+            [("Kısa (~1 dk)", "short"), ("Dengeli (~1.5–2 dk)", "balanced"), ("Detaylı (~3 dk)", "detailed")],
+            get_briefing_length_mode(), set_briefing_length_mode,
+        ))
+        card_layout.addLayout(self._build_persona_combo_row(
+            "📈", "Piyasa özeti filtresi", "Sakin günlerde döviz ve borsa kalabalığını önler.",
+            [("Sadece önemli değişimde (≥%1.5)", "significant"), ("Her zaman göster", "always"), ("Kapalı", "off")],
+            get_briefing_finance_mode(), set_briefing_finance_mode,
+        ))
+
+        learn_row = QHBoxLayout()
+        learn_row.setSpacing(12)
+        learn_row.addWidget(IconBadge("🇬🇧", bg_color="rgba(245, 158, 11, 25)", fg_color=ACCENT, size=34, font_size=15, radius=9))
+        l_txt = QVBoxLayout()
+        l_txt.setSpacing(1)
+        ll1 = QLabel("Günün İngilizce Öğrenme Kartı")
+        ll1.setStyleSheet("font-size: 13px; font-weight: 600; color: #E5E7EB;")
+        ll2 = QLabel("Havacılık teknik İngilizcesi ve kendi kelime notlarınla günlük tekrar.")
+        ll2.setStyleSheet("font-size: 11px; color: #8592A6;")
+        l_txt.addWidget(ll1)
+        l_txt.addWidget(ll2)
+        learn_row.addLayout(l_txt, stretch=1)
+        learn_toggle = ToggleSwitch(checked=get_learning_card_enabled())
+        learn_toggle.toggled.connect(lambda checked: (set_learning_card_enabled(checked), self._push_config_async()))
+        learn_row.addWidget(learn_toggle)
+        card_layout.addLayout(learn_row)
 
         return card
 
@@ -2079,15 +2160,7 @@ class DailyDashboardWindow(QWidget):
         # yanıtı gelince) dinamik olarak ekleniyor; yeniden boyama tetikler.
         self.update()
 
-        today_forecast = result["days"][0] if result["days"] else {}
-        self._weather_data_for_briefing = {
-            "sicaklik_c": current.get("temperature_2m"),
-            "aciklama": desc,
-            "nem_yuzde": current.get("relative_humidity_2m"),
-            "ruzgar_kmh": current.get("wind_speed_10m"),
-            "bugun_max_c": today_forecast.get("tmax"),
-            "bugun_min_c": today_forecast.get("tmin"),
-        }
+        self._weather_data_for_briefing = briefing_data.extract_weather_for_briefing(result)
         self._maybe_generate_briefing()
 
     def _on_weather_error(self, error_message):

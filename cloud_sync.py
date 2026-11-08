@@ -31,6 +31,7 @@ _CATEGORY_COLUMNS = {
     "appointment": ("appt_date", "appt_time", "location", "related_person"),
     "shopping": ("product_name", "quantity"),
     "reminder": ("remind_at", "repeat_frequency", "notified_at"),
+    "task": ("due_date", "context"),
     "general": (),
 }
 
@@ -74,6 +75,7 @@ def _apply_note(cloud_note, local_message_id):
         telegram_message_id=local_message_id,
         needs_review=bool(cloud_note.get("needs_review")),
         extra=extra,
+        priority=cloud_note.get("priority", "normal"),
     )
     if cloud_note.get("completed"):
         note_database.set_completed(note_id, True)
@@ -92,7 +94,12 @@ def sync_from_cloud():
     cloud_messages = payload.get("telegram_messages", [])
     cloud_notes = payload.get("notes", [])
     completed_notes = payload.get("completed_notes", [])
+    learning_rows = payload.get("learning_progress", [])
     newly_completed = note_database.mark_completed_from_cloud(completed_notes) if completed_notes else 0
+    if learning_rows:
+        note_database.sync_learning_progress_from_cloud(learning_rows)
+    if "shift_manual_override" in payload:
+        persona_settings.set_shift_override(payload.get("shift_manual_override") or "")
 
     if not cloud_messages and not cloud_notes:
         return newly_completed
@@ -138,6 +145,10 @@ def push_config():
     payload = {
         "persona_espri_pct": persona_settings.get_espri_pct(),
         "persona_arkadas_pct": persona_settings.get_arkadaslik_pct(),
+        "persona_hitap_sekli": persona_settings.get_hitap_sekli(),
+        "briefing_length_mode": persona_settings.get_briefing_length_mode(),
+        "briefing_finance_mode": persona_settings.get_briefing_finance_mode(),
+        "briefing_learning_card_enabled": 1 if persona_settings.get_learning_card_enabled() else 0,
         "briefing_events_min_priority": telegram_settings.get_briefing_events_min_priority(),
     }
 

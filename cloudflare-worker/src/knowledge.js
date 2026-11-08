@@ -25,6 +25,7 @@ const CATEGORY_LABELS = {
   appointment: "Randevu",
   shopping: "Alışveriş",
   reminder: "Hatırlatma / Yapılacak İş",
+  task: "Görev",
   general: "Genel Not",
 };
 
@@ -408,6 +409,8 @@ export function resolveCalendarEntries(vaultRows, noteRows, todayDate) {
       if (n.location) parts.push(`Konum: ${n.location}`);
       if (desc && trLower(desc) !== trLower(title)) parts.push(desc);
       rawEntries.push({ tur: "Randevu", kim: kim || "Randevu", tarihRaw: n.appt_date, tekrar: "", not: parts.join(", ") });
+    } else if (n.category === "task" && n.due_date && trLower(n.due_date) !== "yok") {
+      rawEntries.push({ tur: "Görev", kim: title || "Görev", tarihRaw: n.due_date, tekrar: "", not: desc });
     } else if (n.category === "reminder" && n.remind_at && trLower(n.remind_at) !== "yok") {
       let kim = title;
       let tur = "Hatırlatma";

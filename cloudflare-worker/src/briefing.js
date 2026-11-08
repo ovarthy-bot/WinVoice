@@ -1,46 +1,104 @@
 // src/briefing.js
 //
-// Günlük Brifing'in bulut tarafı — telegram_briefing.py (+ briefing_data.py,
-// briefing_text.py, persona_settings.py, tr_dates.py, tr_numbers.py,
-// personal_context.py'nin build_reminder_block'u) buradaki JS karşılığına
-// birebir port edildi. Tek fark: yerel Ollama (gemma3:4b) yerine Groq
-// kullanılıyor (bkz. index.js'teki not sınıflandırmasıyla AYNI Groq
-// çağrısı) — bu yüzden PC kapalıyken de her gün saat 05:00'te (cron
-// "0 2 * * *", UTC+3) brifing Telegram'a gönderilebiliyor.
-//
-// "Kişisel hatırlatmalara gelirsek..." paragrafı (doğum günü/ödeme/randevu)
-// "Doğum Günleri ve Randevular.md" notuna dayanıyor. HAKKIMDA artık SADECE
-// Cloudflare D1'de (vault_notes tablosu, bkz. index.js handleVaultImport/
-// migrate_hakkimda_to_cloud.py) yönetildiği için bu, aynı D1 binding'inden
-// doğrudan okunur — WinVoice'tan ayrıca bir şey itilmesine gerek yok.
+// Akıllı Günlük Brifing'in bulut (Cloudflare Worker + D1 + Groq) orkestratörü.
+// Masaüstü Python mimarisiyle (briefing_data.py + briefing_text.py +
+// briefing_coordinator.py + learning_cards.py + persona_settings.py) %100 eşleniktir:
+//   1. Kişisel Görev, Takvim ve Alışveriş Koordinatörü (D1 notes + Doğum Günleri ve Randevular.md)
+//   2. R1D Vardiya & İş Günü Hazırlığı (07-15 / 15-23 / Tatil + Eksik Eğitimlerim.md)
+//   3. Saatlik Hava & Kıyafet Rehberi (çıkış / gün içi / dönüş dilimleri)
+//   4. Koşullu Piyasa Filtresi (<%1,5 döviz/altın/BIST ve <%3,5 BTC ise tamamen atlanır)
+//   5. 3 Eksenli Kişisel Haber Motoru (Havacılık, YZ/Yazılım, TR/Dünya + seen_news hafızası)
+//   6. Aralıklı Tekrarlı İngilizce Öğrenme Kartı ([✅ Öğrendim] / [🔁 Tekrar Sor] butonlu)
+//   7. Haftalık Aktif Proje Odağı (Pazartesi günleri)
 
-import { getConfigValue, httpGetJson, httpGetText, sendTelegramMessage, setConfigValue, stripHtmlTags } from "./common.js";
+import {
+  getConfigValue,
+  httpGetJson,
+  httpGetText,
+  nowIstanbulIso,
+  sendTelegramMessage,
+  setConfigValue,
+  stripHtmlTags,
+} from "./common.js";
 import { getPrioritizedEvents } from "./events.js";
-
-// --------------------------------------------------------------------------- //
-// briefing_data.py portu — hava/piyasa/haber ham veri kaynakları
-// --------------------------------------------------------------------------- //
+import { tryMakeDate } from "./knowledge.js";
+import {
+  buildPersonalCoordinationTelegram,
+  buildWeeklyProjectTelegram,
+  buildWorkdayPrepTelegram,
+  collectPersonalCoordinationData,
+  fetchAllowlistedVaultMap,
+  resolveShiftForDate,
+  toIsoDateUtc,
+} from "./briefing_coordinator.js";
+import {
+  VAULT_ENGLISH_WORDS_PATH,
+  buildLearningCardInlineMarkup,
+  formatLearningCardTelegram,
+  selectDailyLearningCard,
+} from "./learning.js";
 
 const LATITUDE = 41.1431;
 const LONGITUDE = 28.4606;
 const LOCATION = "İstanbul / Çatalca";
 
-const NEWS_AI_RSS_URL = "https://techcrunch.com/category/artificial-intelligence/feed/";
-const NEWS_TURKEY_RSS_URL = "https://www.ntv.com.tr/gundem.rss";
-const NEWS_WORLD_RSS_URL = "https://www.ntv.com.tr/dunya.rss";
+const FEED_SOURCES = [
+  { name: "AeroTime", category: "HAVACILIK", itemTag: "item", summaryTag: "description", pubTag: "pubDate", url: "https://www.aerotime.aero/feed", limit: 8 },
+  { name: "HavaSosyalMedya", category: "HAVACILIK", itemTag: "item", summaryTag: "description", pubTag: "pubDate", url: "https://www.havasosyalmedya.com/feed/", limit: 6 },
+  { name: "AirlineHaber", category: "HAVACILIK", itemTag: "item", summaryTag: "description", pubTag: "pubDate", url: "https://www.airlinehaber.com/feed/", limit: 6 },
+  { name: "TechCrunchAI", category: "YAPAY ZEKA VE YAZILIM", itemTag: "item", summaryTag: "description", pubTag: "pubDate", url: "https://techcrunch.com/category/artificial-intelligence/feed/", limit: 6 },
+  { name: "GitHubBlog", category: "YAPAY ZEKA VE YAZILIM", itemTag: "item", summaryTag: "description", pubTag: "pubDate", url: "https://github.blog/feed/", limit: 5 },
+  { name: "HackerNews", category: "YAPAY ZEKA VE YAZILIM", itemTag: "item", summaryTag: "description", pubTag: "pubDate", url: "https://hnrss.org/frontpage?points=150", limit: 6 },
+  { name: "NTVGundem", category: "TÜRKİYE", itemTag: "entry", summaryTag: "summary", pubTag: "published", url: "https://www.ntv.com.tr/gundem.rss", limit: 8 },
+  { name: "NTVDunya", category: "DÜNYA", itemTag: "entry", summaryTag: "summary", pubTag: "published", url: "https://www.ntv.com.tr/dunya.rss", limit: 6 },
+  { name: "BBCTurkce", category: "DÜNYA", itemTag: "item", summaryTag: "description", pubTag: "pubDate", url: "https://feeds.bbci.co.uk/turkce/rss.xml", limit: 6 },
+];
 
 const TCMB_RATES_URL = "https://www.tcmb.gov.tr/kurlar/today.xml";
+const USDTRY_YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/TRY=X";
 const BIST100_URL = "https://query1.finance.yahoo.com/v8/finance/chart/XU100.IS";
 const GOLD_FUTURES_URL = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F";
-const BTC_PRICE_URL = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=try,usd";
+const BTC_PRICE_URL =
+  "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=try,usd&include_24hr_change=true";
 const GRAMS_PER_OUNCE = 31.1034768;
 
-const NEWS_SUMMARY_MAX_LEN = 200;
+const FX_GOLD_BIST_THRESHOLD_PCT = 1.5;
+const BTC_THRESHOLD_PCT = 3.5;
+
+const NEWS_SUMMARY_MAX_LEN = 190;
 
 const CLICKBAIT_PATTERNS = [
   "son dakika", "açıklandı", "sorgulama", "canlı sonuç", "canlı sonuçlar",
-  "çekiliş sonuçları", "kazandıran numaralar", "sorgula",
+  "çekiliş sonuçları", "kazandıran numaralar", "sorgula", "belli oldu",
+  "şok karar", "bakın kim", "inanılmaz", "görenler şaşırdı",
 ];
+
+const AVIATION_HIGH_KEYWORDS = [
+  "airbus", "boeing", "easa", "shgm", "faa", "thy", "türk hava yolları",
+  "turkish airlines", "turkish technic", "iga", "istanbul havalimanı",
+  "mro", "kabin", "cabin", "maintenance", "bakım", "airworthiness",
+  "a320", "a321", "a330", "a350", "b737", "b777", "b787", "777", "330",
+  "escape slide", "emergency", "avionics", "hangar", "filo", "uçak",
+];
+
+const AI_DEV_HIGH_KEYWORDS = [
+  "ai", "artificial intelligence", "yapay zeka", "llm", "agent", "agents",
+  "claude", "anthropic", "openai", "gpt", "gemini", "ollama", "local model",
+  "open source", "github", "copilot", "flutter", "dart", "python", "windows",
+  "sqlite", "cloudflare", "reasoning", "coding", "developer",
+];
+
+const GENERAL_IMPORTANCE_KEYWORDS = [
+  "safety", "directive", "recall", "release", "launched", "announces",
+  "merkez bankası", "faiz", "enflasyon", "istanbul", "çatalca", "deprem",
+  "savunma", "teknofest", "uzay", "anlaşma", "yönetmelik",
+];
+
+const NEWS_STOPWORDS = new Set([
+  "the", "and", "for", "with", "from", "that", "this", "into", "over", "after",
+  "new", "how", "why", "bir", "ile", "için", "olan", "göre", "daha", "yeni",
+  "olarak", "sonra", "kadar", "üzerine", "ilgili",
+]);
 
 const WEATHER_CODES = {
   0: "Açık", 1: "Az bulutlu", 2: "Parçalı Bulutlu", 3: "Kapalı",
@@ -51,6 +109,20 @@ const WEATHER_CODES = {
   80: "Sağanak", 81: "Kuvvetli sağanak", 82: "Şiddetli sağanak",
   95: "Gök gürültülü fırtına", 96: "Dolu ile fırtına", 99: "Şiddetli dolu fırtınası",
 };
+
+const RAIN_CODES = new Set([51, 53, 55, 61, 63, 65, 80, 81, 82, 95, 96, 99]);
+const SNOW_CODES = new Set([71, 73, 75]);
+const FOG_CODES = new Set([45, 48]);
+
+const TR_MONTHS = ["Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"];
+const TR_DAYS = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"];
+
+const KNOWN_SECTION_HEADER_RE =
+  /^\s*[\*_#]{0,3}\s*(giriş|hava\s*&\s*piyasa|hava\s+ve\s+piyasa|seçilmiş\s+gündem|havacılık|yapay\s+zeka|türkiye\s+gündemi|dünya\s+turu|teknoloji|kapanış)\s*[:：]\s*[\*_#]{0,3}\s*/i;
+
+// --------------------------------------------------------------------------- //
+// RSS Okuma + 3 Eksenli Haber Puanlama + seen_news Hafızası
+// --------------------------------------------------------------------------- //
 
 function isClickbait(title) {
   const lower = title.toLowerCase().trim();
@@ -82,61 +154,233 @@ function extractTag(block, tagName) {
   return content;
 }
 
-async function fetchItemsFromFeed(url, itemTag, summaryTag, limit) {
+function titleTokens(title) {
+  const cleaned = String(title || "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, " ");
+  const out = new Set();
+  for (const tok of cleaned.split(/\s+/)) {
+    if (tok.length >= 3 && !NEWS_STOPWORDS.has(tok) && !/^\d+$/.test(tok)) {
+      out.add(tok);
+    }
+  }
+  return out;
+}
+
+function newsFingerprint(title) {
+  const sorted = [...titleTokens(title)].sort();
+  const basis = sorted.length ? sorted.slice(0, 8).join(" ") : String(title || "").toLowerCase().trim();
+  // FNV-1a çift 32-bit deterministik özet
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193;
+  for (let i = 0; i < basis.length; i++) {
+    const ch = basis.charCodeAt(i);
+    h1 ^= ch;
+    h1 = Math.imul(h1, 0x01000193) >>> 0;
+    h2 ^= ch + i;
+    h2 = Math.imul(h2, 0x85ebca6b) >>> 0;
+  }
+  return h1.toString(16).padStart(8, "0") + h2.toString(16).padStart(8, "0");
+}
+
+function jaccardSimilarity(setA, setB) {
+  if (!setA.size || !setB.size) return 0;
+  let inter = 0;
+  for (const x of setA) {
+    if (setB.has(x)) inter++;
+  }
+  const union = setA.size + setB.size - inter;
+  return union ? inter / union : 0;
+}
+
+async function fetchSingleFeed(source) {
   try {
-    const xml = await httpGetText(url);
+    const xml = await httpGetText(source.url);
     const results = [];
-    for (const block of extractBlocks(xml, itemTag)) {
+    for (const block of extractBlocks(xml, source.itemTag)) {
       const title = stripHtmlTags(extractTag(block, "title"));
       if (!title || isClickbait(title)) continue;
-      const summary = truncate(stripHtmlTags(extractTag(block, summaryTag)));
-      results.push({ title, summary });
-      if (results.length >= limit) break;
+      const summary = truncate(stripHtmlTags(extractTag(block, source.summaryTag)));
+      const pubRaw = extractTag(block, source.pubTag) || extractTag(block, "updated") || "";
+      const pubMs = pubRaw ? Date.parse(pubRaw) : NaN;
+      results.push({
+        title,
+        summary,
+        category: source.category,
+        source: source.name,
+        pubMs: Number.isFinite(pubMs) ? pubMs : null,
+      });
+      if (results.length >= source.limit) break;
     }
     return results;
   } catch (e) {
-    console.error(`RSS alınamadı (${url}):`, e);
+    console.error(`RSS alınamadı (${source.name}):`, e);
     return [];
   }
 }
 
-function formatNewsBlock(categoryLabel, items) {
-  return items.map((item) => {
-    let line = `[${categoryLabel}] ${item.title}`;
-    if (item.summary) line += ` — ${item.summary}`;
-    return line;
-  });
+function scoreNewsItem(item, nowMs, duplicateCount = 1) {
+  const haystack = `${item.title} ${item.summary || ""}`.toLowerCase();
+  const cat = item.category;
+
+  const aviHits = AVIATION_HIGH_KEYWORDS.filter((kw) => haystack.includes(kw)).length;
+  const aiHits = AI_DEV_HIGH_KEYWORDS.filter((kw) => haystack.includes(kw)).length;
+
+  let interest;
+  if (cat === "HAVACILIK" || aviHits >= 1) interest = Math.min(50, 34 + aviHits * 6);
+  else if (cat === "YAPAY ZEKA VE YAZILIM" || aiHits >= 1) interest = Math.min(48, 30 + aiHits * 5);
+  else if (cat === "TÜRKİYE") interest = 24;
+  else interest = 20;
+
+  const impHits = GENERAL_IMPORTANCE_KEYWORDS.filter((kw) => haystack.includes(kw)).length;
+  const multiBoost = Math.min(14, (duplicateCount - 1) * 8);
+  const summaryBonus = (item.summary || "").length >= 50 ? 4 : 0;
+  const importance = Math.min(30, 8 + impHits * 5 + multiBoost + summaryBonus);
+
+  let recency = 10;
+  if (item.pubMs !== null) {
+    const ageHours = Math.max(0, (nowMs - item.pubMs) / 3600000);
+    if (ageHours > 36) return -1;
+    if (ageHours <= 6) recency = 20;
+    else if (ageHours <= 14) recency = 15;
+    else if (ageHours <= 24) recency = 10;
+    else recency = 5;
+  }
+
+  return interest + importance + recency;
 }
 
-async function fetchNewsItemsText() {
-  const turkeyItems = await fetchItemsFromFeed(NEWS_TURKEY_RSS_URL, "entry", "summary", 6);
-  const worldItems = await fetchItemsFromFeed(NEWS_WORLD_RSS_URL, "entry", "summary", 5);
-  const aiItems = await fetchItemsFromFeed(NEWS_AI_RSS_URL, "item", "description", 3);
+function selectPersonalizedNews(rawItems, seenFingerprints, lengthMode = "balanced") {
+  const nowMs = Date.now();
+  const clusters = [];
 
-  const seenTitles = new Set();
-  const dedupe = (items) =>
-    items.filter((item) => {
-      const key = item.title.toLowerCase().trim();
-      if (seenTitles.has(key)) return false;
-      seenTitles.add(key);
-      return true;
-    });
+  for (const item of rawItems) {
+    const tokens = titleTokens(item.title);
+    const fp = newsFingerprint(item.title);
+    let merged = false;
+    for (const cl of clusters) {
+      if (cl.fingerprint === fp || jaccardSimilarity(tokens, cl.tokens) >= 0.42) {
+        cl.count += 1;
+        if ((item.summary || "").length > (cl.rep.summary || "").length) {
+          cl.rep = item;
+        }
+        merged = true;
+        break;
+      }
+    }
+    if (!merged) {
+      clusters.push({ rep: item, tokens, fingerprint: fp, count: 1 });
+    }
+  }
 
-  const lines = [
-    ...formatNewsBlock("TÜRKİYE", dedupe(turkeyItems)),
-    ...formatNewsBlock("DÜNYA", dedupe(worldItems)),
-    ...formatNewsBlock("TEKNOLOJİ", dedupe(aiItems)),
+  const scored = [];
+  for (const cl of clusters) {
+    if (seenFingerprints.has(cl.fingerprint)) continue;
+    const score = scoreNewsItem(cl.rep, nowMs, cl.count);
+    if (score < 0) continue;
+    scored.push({ ...cl.rep, fingerprint: cl.fingerprint, score });
+  }
+  scored.sort((a, b) => b.score - a.score);
+
+  const targetTotal = lengthMode === "short" ? 3 : lengthMode === "detailed" ? 6 : 4;
+  const selected = [];
+  const usedFps = new Set();
+
+  const preferredBuckets = [
+    ["HAVACILIK"],
+    ["YAPAY ZEKA VE YAZILIM"],
+    ["TÜRKİYE", "DÜNYA"],
   ];
-  return lines.length ? lines.join("\n") : "(Haber akışı alınamadı.)";
+
+  for (const allowed of preferredBuckets) {
+    if (selected.length >= targetTotal) break;
+    const found = scored.find((c) => !usedFps.has(c.fingerprint) && allowed.includes(c.category));
+    if (found) {
+      selected.push(found);
+      usedFps.add(found.fingerprint);
+    }
+  }
+
+  const catCounts = {};
+  for (const s of selected) catCounts[s.category] = (catCounts[s.category] || 0) + 1;
+
+  for (const cand of scored) {
+    if (selected.length >= targetTotal) break;
+    if (usedFps.has(cand.fingerprint)) continue;
+    if ((catCounts[cand.category] || 0) >= 2 && lengthMode !== "detailed") continue;
+    selected.push(cand);
+    usedFps.add(cand.fingerprint);
+    catCounts[cand.category] = (catCounts[cand.category] || 0) + 1;
+  }
+
+  return selected;
 }
+
+async function getSeenNewsSet(db) {
+  try {
+    const cutoff = new Date(Date.now() - 7 * 86400000 + 3 * 3600000).toISOString();
+    const rows = await db.prepare("SELECT fingerprint FROM seen_news WHERE shown_at >= ?").bind(cutoff).all();
+    return new Set((rows.results || []).map((r) => r.fingerprint));
+  } catch (_) {
+    return new Set();
+  }
+}
+
+async function recordSeenNews(db, selectedItems) {
+  if (!selectedItems || !selectedItems.length) return;
+  try {
+    const nowIso = nowIstanbulIso();
+    const pruneCutoff = new Date(Date.now() - 14 * 86400000).toISOString();
+    await db.prepare("DELETE FROM seen_news WHERE shown_at < ?").bind(pruneCutoff).run();
+    for (const it of selectedItems) {
+      await db
+        .prepare(
+          "INSERT INTO seen_news (fingerprint, title, category, shown_at) VALUES (?, ?, ?, ?) " +
+            "ON CONFLICT(fingerprint) DO UPDATE SET shown_at = excluded.shown_at"
+        )
+        .bind(it.fingerprint, it.title, it.category, nowIso)
+        .run();
+    }
+  } catch (e) {
+    console.error("seen_news güncellenemedi:", e);
+  }
+}
+
+async function fetchNewsItemsText(db, lengthMode = "balanced") {
+  const feedArrays = await Promise.all(FEED_SOURCES.map((src) => fetchSingleFeed(src)));
+  const rawItems = feedArrays.flat();
+  const seenSet = await getSeenNewsSet(db);
+
+  let selected = selectPersonalizedNews(rawItems, seenSet, lengthMode);
+  if (!selected.length && rawItems.length) {
+    selected = selectPersonalizedNews(rawItems, new Set(), lengthMode);
+  }
+  if (!selected.length) return "(Haber akışı alınamadı.)";
+
+  await recordSeenNews(db, selected);
+
+  return selected
+    .map((item) => {
+      let line = `[${item.category}] ${item.title}`;
+      if (item.summary) line += ` — ${item.summary}`;
+      return line;
+    })
+    .join("\n");
+}
+
+// --------------------------------------------------------------------------- //
+// Saatlik Hava Durumu & Vardiya Uyumlu Kıyafet Rehberi
+// --------------------------------------------------------------------------- //
 
 async function fetchWeatherForBriefing() {
   const url =
     "https://api.open-meteo.com/v1/forecast" +
     `?latitude=${LATITUDE}&longitude=${LONGITUDE}` +
-    "&current=temperature_2m,relative_humidity_2m,surface_pressure,wind_speed_10m,weather_code" +
+    "&current=temperature_2m,apparent_temperature,relative_humidity_2m,surface_pressure,wind_speed_10m,weather_code" +
+    "&hourly=temperature_2m,apparent_temperature,precipitation_probability,wind_gusts_10m,weather_code" +
     "&daily=weather_code,temperature_2m_max,temperature_2m_min" +
     "&timezone=Europe%2FIstanbul&forecast_days=7";
+
   const data = await httpGetJson(url);
   const current = data.current || {};
   const today = (data.daily?.time || []).length
@@ -146,19 +390,151 @@ async function fetchWeatherForBriefing() {
         tmin: data.daily.temperature_2m_min[0],
       }
     : {};
+
+  const hourlyRaw = data.hourly || {};
+  const hTimes = hourlyRaw.time || [];
+  const hourly = [];
+  for (let i = 0; i < Math.min(32, hTimes.length); i++) {
+    hourly.push({
+      hourIndex: i,
+      temp: hourlyRaw.temperature_2m?.[i] ?? null,
+      apparent: hourlyRaw.apparent_temperature?.[i] ?? null,
+      precipProb: hourlyRaw.precipitation_probability?.[i] ?? 0,
+      windGust: hourlyRaw.wind_gusts_10m?.[i] ?? 0,
+      code: hourlyRaw.weather_code?.[i] ?? 0,
+    });
+  }
+
   return {
     sicaklik_c: current.temperature_2m,
+    hissedilen_c: current.apparent_temperature,
     aciklama: WEATHER_CODES[current.weather_code] ?? "Bilinmiyor",
     nem_yuzde: current.relative_humidity_2m,
     ruzgar_kmh: current.wind_speed_10m,
     bugun_max_c: today.tmax,
     bugun_min_c: today.tmin,
+    hourly,
   };
+}
+
+function getShiftWeatherWindows(shiftCode) {
+  if (shiftCode === "07-15") {
+    return [
+      { spokenLbl: "sabah çıkarken", tgLbl: "Sabah çıkış (05-07)", start: 5, end: 7 },
+      { spokenLbl: "öğle saatlerinde", tgLbl: "Gün içi (11-14)", start: 11, end: 14 },
+      { spokenLbl: "akşamüstü dönerken", tgLbl: "Dönüş (16-18)", start: 16, end: 18 },
+    ];
+  }
+  if (shiftCode === "15-23") {
+    return [
+      { spokenLbl: "öğlen çıkarken", tgLbl: "Öğlen çıkış (12-14)", start: 12, end: 14 },
+      { spokenLbl: "akşam saatlerinde", tgLbl: "Akşam (17-20)", start: 17, end: 20 },
+      { spokenLbl: "gece dönerken", tgLbl: "Gece dönüş (23-00)", start: 23, end: 25 },
+    ];
+  }
+  return [
+    { spokenLbl: "sabah saatlerinde", tgLbl: "Sabah (07-10)", start: 7, end: 10 },
+    { spokenLbl: "gün ortasında", tgLbl: "Öğle (12-16)", start: 12, end: 16 },
+    { spokenLbl: "akşam saatlerinde", tgLbl: "Akşam (18-21)", start: 18, end: 21 },
+  ];
+}
+
+function summarizeHourlyWindow(hourly, startIdx, endIdx) {
+  const pts = (hourly || []).filter(
+    (p) => p.hourIndex >= startIdx && p.hourIndex <= endIdx && p.temp !== null && p.temp !== undefined
+  );
+  if (!pts.length) return null;
+  const avgTemp = Math.round(pts.reduce((s, p) => s + p.temp, 0) / pts.length);
+  const avgApparent = Math.round(pts.reduce((s, p) => s + (p.apparent ?? p.temp), 0) / pts.length);
+  const maxPrecip = Math.max(...pts.map((p) => Number(p.precipProb || 0)));
+  const maxGust = Math.round(Math.max(...pts.map((p) => Number(p.windGust || 0))));
+  const hasRain = pts.some((p) => RAIN_CODES.has(Number(p.code))) || maxPrecip >= 45;
+  const hasSnow = pts.some((p) => SNOW_CODES.has(Number(p.code)));
+  const hasFog = pts.some((p) => FOG_CODES.has(Number(p.code)));
+  return { temp: avgTemp, apparent: avgApparent, maxPrecip, maxGust, hasRain, hasSnow, hasFog };
+}
+
+function topClothingAdvice(minApp, maxApp) {
+  if (minApp <= 4) return "kalın mont veya kabanla çık";
+  if (minApp <= 11) {
+    if (maxApp >= 18) return "sabah serinliği için ceket veya mont giy, öğlen ısınacağı için içine ince katman seç";
+    return "mont veya kalın bir ceket tercih et";
+  }
+  if (maxApp < 21) return "ince bir ceket veya uzun kollu katman yeterli olur";
+  return "hafif gömlek veya tişörtle rahat edersin";
+}
+
+function buildSmartWeatherTelegram(weatherData, shiftCode = "tatil") {
+  const w = weatherData || {};
+  const windows = getShiftWeatherWindows(shiftCode);
+  const winStats = [];
+
+  for (const win of windows) {
+    const st = summarizeHourlyWindow(w.hourly, win.start, win.end);
+    if (st) winStats.push({ ...win, ...st });
+  }
+
+  if (!winStats.length) {
+    if (w.sicaklik_c === undefined || w.sicaklik_c === null) return "";
+    const cur = Math.round(w.sicaklik_c);
+    const low = Math.round(w.bugun_min_c ?? cur);
+    const high = Math.round(w.bugun_max_c ?? cur);
+    const advice = topClothingAdvice(low, high);
+    return `🌤️ Hava & Hazırlık:\n• Çatalca: ${w.aciklama || ""}, ${cur}°C (${low}°C / ${high}°C)\n• Öneri: ${advice}.`;
+  }
+
+  const minApp = Math.min(...winStats.map((x) => x.apparent));
+  const maxApp = Math.max(...winStats.map((x) => x.apparent));
+  const maxGust = Math.max(...winStats.map((x) => x.maxGust));
+  const rainWindows = winStats.filter((x) => x.hasRain);
+  const snowWindows = winStats.filter((x) => x.hasSnow);
+  const fogOut = winStats[0].hasFog;
+
+  const tips = [topClothingAdvice(minApp, maxApp)];
+  if (maxApp - minApp >= 7 && !tips[0].includes("katman")) {
+    tips.push("hissedilen sıcaklık gün içinde belirgin değişeceği için katmanlı giyin");
+  }
+  if (snowWindows.length) {
+    tips.push("kar beklentisi nedeniyle su geçirmez bot ve eldiven al");
+  } else if (rainWindows.length) {
+    const whenLbl = rainWindows.slice(0, 2).map((x) => x.spokenLbl).join(" ve ");
+    const peakP = Math.max(...rainWindows.map((x) => x.maxPrecip));
+    tips.push(`${whenLbl} yağış ihtimali %${peakP}, yanına şemsiye veya yağmurluk al`);
+  }
+  if (maxGust >= 38) {
+    tips.push(`rüzgar hamlesi ${maxGust} km/s, rüzgar kesici dış katman iyi olur`);
+  }
+  if (fogOut) {
+    tips.push("çıkış saatinde sis beklendiği için birkaç dakika erken çıkmakta fayda var");
+  }
+
+  const winSummary = winStats
+    .map((x) => `${x.tgLbl}: ${x.apparent}°C` + (x.maxPrecip >= 30 ? ` (🌧️%${x.maxPrecip})` : ""))
+    .join(" | ");
+
+  return `🌤️ Saatlik Hava & Kıyafet Rehberi:\n• ${winSummary}\n• Hazırlık: ${tips.join("; ")}.`;
+}
+
+// --------------------------------------------------------------------------- //
+// Koşullu Piyasa Filtresi (<%1,5 döviz/altın/BIST ve <%3,5 BTC ise tamamen atlanır)
+// --------------------------------------------------------------------------- //
+
+async function yahooPriceAndPct(url) {
+  const data = await httpGetJson(url);
+  const meta = data.chart.result[0].meta;
+  const price = meta.regularMarketPrice;
+  let pct = meta.regularMarketChangePercent;
+  if (pct === undefined || pct === null) {
+    const prev = meta.chartPreviousClose || meta.previousClose;
+    if (price && prev) pct = ((price - prev) / prev) * 100;
+  }
+  return { price, pct: Number.isFinite(pct) ? Math.round(pct * 100) / 100 : 0 };
 }
 
 async function fetchFinance() {
   const result = {};
   let usdTry = null;
+  let usdPct = 0;
 
   try {
     const xml = await httpGetText(TCMB_RATES_URL);
@@ -169,30 +545,50 @@ async function fetchFinance() {
       if (Number.isFinite(usdTry)) result.usd_try_satis = Math.round(usdTry * 10000) / 10000;
     }
   } catch (e) {
-    console.error("Dolar kuru alınamadı:", e);
+    console.error("TCMB dolar kuru alınamadı:", e);
   }
 
   try {
-    const data = await httpGetJson(BIST100_URL);
-    const meta = data.chart.result[0].meta;
-    result.bist100 = Math.round(meta.regularMarketPrice * 100) / 100;
-    result.bist100_gunluk_yuzde_degisim = Math.round((meta.regularMarketChangePercent || 0) * 100) / 100;
+    const { price, pct } = await yahooPriceAndPct(USDTRY_YAHOO_URL);
+    usdPct = pct;
+    result.usd_try_gunluk_yuzde_degisim = usdPct;
+    if (!usdTry && price) {
+      usdTry = price;
+      result.usd_try_satis = Math.round(usdTry * 10000) / 10000;
+    }
+  } catch (e) {
+    console.error("USD/TRY değişim yüzdesi alınamadı:", e);
+  }
+
+  try {
+    const { price, pct } = await yahooPriceAndPct(BIST100_URL);
+    if (price) {
+      result.bist100 = Math.round(price * 100) / 100;
+      result.bist100_gunluk_yuzde_degisim = pct;
+    }
   } catch (e) {
     console.error("BIST100 verisi alınamadı:", e);
   }
 
   try {
-    const data = await httpGetJson(GOLD_FUTURES_URL);
-    const goldUsdOz = data.chart.result[0].meta.regularMarketPrice;
-    if (usdTry) result.gram_altin_try = Math.round(((goldUsdOz * usdTry) / GRAMS_PER_OUNCE) * 100) / 100;
+    const { price: goldUsdOz, pct: goldUsdPct } = await yahooPriceAndPct(GOLD_FUTURES_URL);
+    if (goldUsdOz && usdTry) {
+      result.gram_altin_try = Math.round(((goldUsdOz * usdTry) / GRAMS_PER_OUNCE) * 100) / 100;
+      result.gram_altin_gunluk_yuzde_degisim = Math.round((goldUsdPct + usdPct) * 100) / 100;
+    }
   } catch (e) {
     console.error("Altın verisi alınamadı:", e);
   }
 
   try {
     const data = await httpGetJson(BTC_PRICE_URL);
-    result.btc_try = data.bitcoin.try;
-    result.btc_usd = data.bitcoin.usd;
+    const btc = data.bitcoin || {};
+    result.btc_try = btc.try;
+    result.btc_usd = btc.usd;
+    const btcPct = btc.try_24h_change ?? btc.usd_24h_change;
+    if (Number.isFinite(btcPct)) {
+      result.btc_gunluk_yuzde_degisim = Math.round(btcPct * 100) / 100;
+    }
   } catch (e) {
     console.error("BTC verisi alınamadı:", e);
   }
@@ -200,87 +596,47 @@ async function fetchFinance() {
   return result;
 }
 
-// --------------------------------------------------------------------------- //
-// tr_numbers.py portu
-// --------------------------------------------------------------------------- //
-
-const ONES = ["", "bir", "iki", "üç", "dört", "beş", "altı", "yedi", "sekiz", "dokuz"];
-const TENS = ["", "on", "yirmi", "otuz", "kırk", "elli", "altmış", "yetmiş", "seksen", "doksan"];
-const SCALES = ["", "bin", "milyon", "milyar", "trilyon"];
-
-function threeDigitsToWords(n) {
-  const hundreds = Math.floor(n / 100);
-  const remainder = n % 100;
-  const tens = Math.floor(remainder / 10);
-  const ones = remainder % 10;
-  const parts = [];
-  if (hundreds) parts.push(hundreds === 1 ? "yüz" : `${ONES[hundreds]} yüz`);
-  if (tens) parts.push(TENS[tens]);
-  if (ones) parts.push(ONES[ones]);
-  return parts.join(" ");
+function signPct(pct) {
+  return pct > 0 ? `+%${pct.toFixed(2)}` : `%${pct.toFixed(2)}`;
 }
 
-function numberToWords(value) {
-  let n = Math.round(value);
-  if (n === 0) return "sıfır";
-  const negative = n < 0;
-  n = Math.abs(n);
-  const groups = [];
-  while (n > 0) {
-    groups.push(n % 1000);
-    n = Math.floor(n / 1000);
-  }
-  const parts = [];
-  for (let i = groups.length - 1; i >= 0; i--) {
-    const group = groups[i];
-    if (group === 0) continue;
-    if (i === 1 && group === 1) parts.push(SCALES[i]);
-    else if (i > 0) parts.push(`${threeDigitsToWords(group)} ${SCALES[i]}`);
-    else parts.push(threeDigitsToWords(group));
-  }
-  const result = parts.join(" ");
-  return negative ? `eksi ${result}` : result;
-}
+function buildConditionalFinanceTelegram(financeData, financeMode = "significant") {
+  if (financeMode === "off" || !financeData) return "";
 
-function currencyToWords(amount, unit = "lira", subunit = "kuruş") {
-  const negative = amount < 0;
-  amount = Math.abs(amount);
-  let lira = Math.trunc(amount);
-  let kurus = Math.round((amount - lira) * 100);
-  if (kurus >= 100) {
-    lira += 1;
-    kurus -= 100;
-  }
-  let text = `${numberToWords(lira)} ${unit}`;
-  if (kurus > 0) text += ` ${numberToWords(kurus)} ${subunit}`;
-  return negative ? `eksi ${text}` : text;
-}
+  const f = financeData;
+  const usdVal = f.usd_try_satis;
+  const usdPct = f.usd_try_gunluk_yuzde_degisim || 0;
+  const goldVal = f.gram_altin_try;
+  const goldPct = f.gram_altin_gunluk_yuzde_degisim || 0;
+  const bistVal = f.bist100;
+  const bistPct = f.bist100_gunluk_yuzde_degisim || 0;
+  const btcUsd = f.btc_usd;
+  const btcPct = f.btc_gunluk_yuzde_degisim || 0;
 
-function percentToWords(value) {
-  const negative = value < 0;
-  value = Math.abs(value);
-  let integerPart = Math.trunc(value);
-  let decimalPart = Math.round((value - integerPart) * 100);
-  if (decimalPart >= 100) {
-    integerPart += 1;
-    decimalPart -= 100;
-  }
-  let text = `yüzde ${numberToWords(integerPart)}`;
-  if (decimalPart > 0) {
-    const spokenDecimal = decimalPart % 10 === 0 ? Math.floor(decimalPart / 10) : decimalPart;
-    text += ` virgül ${numberToWords(spokenDecimal)}`;
-  }
-  return negative ? `eksi ${text}` : text;
-}
+  const includeAll = financeMode === "always";
+  const movers = [];
 
-const plainNumberToWords = numberToWords;
+  if (usdVal !== undefined && (includeAll || Math.abs(usdPct) >= FX_GOLD_BIST_THRESHOLD_PCT)) {
+    movers.push(Math.abs(usdPct) >= 0.05 ? `USD/TRY: ${usdVal.toFixed(2)} ₺ (${signPct(usdPct)})` : `USD/TRY: ${usdVal.toFixed(2)} ₺`);
+  }
+  if (goldVal !== undefined && (includeAll || Math.abs(goldPct) >= FX_GOLD_BIST_THRESHOLD_PCT)) {
+    movers.push(Math.abs(goldPct) >= 0.05 ? `Gram Altın: ${Math.round(goldVal)} ₺ (${signPct(goldPct)})` : `Gram Altın: ${Math.round(goldVal)} ₺`);
+  }
+  if (bistVal !== undefined && (includeAll || Math.abs(bistPct) >= FX_GOLD_BIST_THRESHOLD_PCT)) {
+    movers.push(`BIST 100: ${Math.round(bistVal)} (${signPct(bistPct)})`);
+  }
+  if (btcUsd !== undefined && (includeAll || Math.abs(btcPct) >= BTC_THRESHOLD_PCT)) {
+    movers.push(`BTC: ${Math.round(btcUsd).toLocaleString("tr-TR")} USD (${signPct(btcPct)})`);
+  }
+
+  if (!movers.length) return "";
+  const header = financeMode === "significant" ? "📈 Piyasa Hareketi:" : "📈 Piyasa Özeti:";
+  return `${header}\n• ${movers.join(" | ")}`;
+}
 
 // --------------------------------------------------------------------------- //
-// tr_dates.py + persona_settings.py portu
+// Persona / Zaman / Uzunluk Yardımcıları ve Prompt İnşası
 // --------------------------------------------------------------------------- //
-
-const TR_MONTHS = ["Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"];
-const TR_DAYS = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"];
 
 function pad2(n) {
   return String(n).padStart(2, "0");
@@ -307,365 +663,119 @@ function arkadaslikTalimati(pct) {
   return "Çok samimi, yakın bir arkadaş gibi sıcak ve içten bir üslup kullan.";
 }
 
-// --------------------------------------------------------------------------- //
-// personal_context.py (SADECE build_reminder_block kısmı) portu
-// --------------------------------------------------------------------------- //
-
-const ROW_RE = /^\|(.+)\|\s*$/;
-const DATE_FULL_RE = /^(\d{1,2})\.(\d{1,2})\.(\d{4})$/;
-const DATE_ANNUAL_RE = /^(\d{1,2})\.(\d{1,2})$/;
-const DAY_ONLY_RE = /^(\d{1,2})$/;
-
-function parseTableRows(markdownText) {
-  const rows = [];
-  for (const rawLine of markdownText.split("\n")) {
-    const line = rawLine.trim();
-    const match = ROW_RE.exec(line);
-    if (!match) continue;
-    const cells = match[1].split("|").map((c) => c.trim());
-    if (cells.length < 3) continue;
-    const first = cells[0];
-    const isSeparator = first.length > 0 && [...first].every((ch) => ch === "-" || ch === ":");
-    if (first === "Tür" || first === "" || isSeparator) continue;
-    if (cells.length > 1 && cells[1].includes("Örnek")) continue;
-    rows.push(cells);
+function hitapTalimati(hitapMode) {
+  if (hitapMode === "patron") {
+    return 'Kullanıcıya "Patron" diye hitap et; ancak metin boyunca en fazla bir veya iki kez kullan.';
   }
-  return rows;
-}
-
-function loadEntries(markdownText) {
-  if (!markdownText) return [];
-  const entries = [];
-  for (const cellsRaw of parseTableRows(markdownText)) {
-    const cells = [...cellsRaw, "", "", "", "", ""].slice(0, 5);
-    const [tur, kim, tarih, tekrar, not_] = cells.map((c) => c.trim());
-    if (!tarih) continue;
-    entries.push({ tur, kim, tarihRaw: tarih, tekrar: tekrar.toLowerCase(), not: not_ });
+  if (hitapMode === "hitapsiz") {
+    return 'Kullanıcıya "Patron", "Onur" gibi herhangi bir özel isim veya unvan kullanmadan doğrudan ve doğal hitap et.';
   }
-  return entries;
+  return 'Kullanıcıya ismiyle ("Onur") doğal şekilde hitap et (yalnızca selamlamada ve uygunsa kapanışta bir kez kullan; her cümlede tekrarlama ve asla "Patron" deme).';
 }
 
-function tryMakeDate(y, m, d) {
-  const dt = new Date(Date.UTC(y, m - 1, d));
-  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== m - 1 || dt.getUTCDate() !== d) return null;
-  return dt;
-}
-
-function daysInMonth(y, m) {
-  return new Date(Date.UTC(y, m, 0)).getUTCDate();
-}
-
-function nextAnnual(day, month, todayDate) {
-  let candidate = tryMakeDate(todayDate.getUTCFullYear(), month, day);
-  if (!candidate) return null;
-  if (candidate.getTime() < todayDate.getTime()) {
-    candidate = tryMakeDate(todayDate.getUTCFullYear() + 1, month, day);
-    if (!candidate) return null;
+function lengthTalimati(lengthMode) {
+  if (lengthMode === "short") {
+    return "KISA MOD: Haber özetlerini çok öz tut; toplamda yalnızca en kritik 2 haberi birer kısa cümleyle aktar.";
   }
-  return candidate;
-}
-
-function nextMonthly(day, todayDate) {
-  let y = todayDate.getUTCFullYear();
-  let m = todayDate.getUTCMonth() + 1;
-  let candidate = tryMakeDate(y, m, Math.min(day, daysInMonth(y, m)));
-  if (candidate.getTime() < todayDate.getTime()) {
-    m += 1;
-    if (m > 12) {
-      m = 1;
-      y += 1;
-    }
-    candidate = tryMakeDate(y, m, Math.min(day, daysInMonth(y, m)));
+  if (lengthMode === "detailed") {
+    return "DETAYLI MOD: Seçilmiş haberlerin her birini bir veya iki doyurucu cümleyle, bağlamını da vererek aktar (toplam 5-6 haber).";
   }
-  return candidate;
+  return "DENGELİ MOD: Seçilmiş haberlerden en önemli 3-4 gelişmeyi sıkmadan, net ve akıcı birer cümleyle özetle.";
 }
 
-function resolveEntryDate(entry, todayDate) {
-  const { tarihRaw, tekrar } = entry;
-
-  if (tekrar === "aylık") {
-    const m = DAY_ONLY_RE.exec(tarihRaw);
-    return m ? nextMonthly(parseInt(m[1], 10), todayDate) : null;
+function briefingTimeContext(hour) {
+  if (hour >= 4 && hour < 12) {
+    return {
+      greeting: "Günaydın",
+      roleDesc: "Kullanıcıya güne başlarken kişisel sabah yaşam koordinasyonu brifingi hazırlıyorsun.",
+      closingHint: "Sabah enerjisine uygun, bugünkü ana odağı destekleyen net ve sıcak tek bir kapanış cümlesi kur.",
+    };
   }
-  if (tekrar === "yıllık") {
-    const m = DATE_ANNUAL_RE.exec(tarihRaw) || DATE_FULL_RE.exec(tarihRaw);
-    return m ? nextAnnual(parseInt(m[1], 10), parseInt(m[2], 10), todayDate) : null;
+  if (hour >= 12 && hour < 18) {
+    return {
+      greeting: "Tünaydın",
+      roleDesc: "Kullanıcıya gün ortası kişisel durum ve gündem koordinasyonu brifingi hazırlıyorsun.",
+      closingHint: "Günün kalan yarısı için odaklayıcı ve kısa tek bir kapanış cümlesi kur.",
+    };
   }
-
-  let m = DATE_FULL_RE.exec(tarihRaw);
-  if (m) {
-    const candidate = tryMakeDate(parseInt(m[3], 10), parseInt(m[2], 10), parseInt(m[1], 10));
-    return candidate && candidate.getTime() >= todayDate.getTime() ? candidate : null;
+  if (hour >= 18 && hour < 22) {
+    return {
+      greeting: "İyi akşamlar",
+      roleDesc: "Kullanıcıya akşam değerlendirmesi ve yarına hazırlık brifingi hazırlıyorsun.",
+      closingHint: "Günü toparlayan ve yarına sakin bir geçiş sağlayan tek bir kapanış cümlesi kur.",
+    };
   }
-  m = DATE_ANNUAL_RE.exec(tarihRaw);
-  if (m) return nextAnnual(parseInt(m[1], 10), parseInt(m[2], 10), todayDate);
-
-  return null;
-}
-
-function getUpcoming(markdownText, withinDays, todayDate) {
-  const result = [];
-  for (const entry of loadEntries(markdownText)) {
-    const target = resolveEntryDate(entry, todayDate);
-    if (!target) continue;
-    const kalanGun = Math.round((target.getTime() - todayDate.getTime()) / 86400000);
-    if (kalanGun >= 0 && kalanGun <= withinDays) result.push({ ...entry, tarih: target, kalanGun });
-  }
-  result.sort((a, b) => a.kalanGun - b.kalanGun);
-  return result;
-}
-
-function tarihIfadesi(kalanGun, tarih) {
-  if (kalanGun === 0) return "bugün";
-  if (kalanGun === 1) return "yarın";
-  return `${kalanGun} gün sonra (${tarih.getUTCDate()} ${TR_MONTHS[tarih.getUTCMonth()]})`;
-}
-
-function cumle(entry) {
-  const ifade = tarihIfadesi(entry.kalanGun, entry.tarih);
-  const tur = entry.tur.toLowerCase();
-  const kim = entry.kim || "Bir kayıt";
-  const notVal = entry.not;
-
-  if (tur.includes("doğum")) return `${kim}'in doğum günü ${ifade}.`;
-  if (tur.includes("ödeme") || tur.includes("fatura") || tur.includes("kredi")) {
-    return `${kim} son ödeme tarihi ${ifade}${notVal ? ` (${notVal})` : ""}.`;
-  }
-  if (tur.includes("randevu")) {
-    return `${kim} randevunuz ${ifade}${notVal ? ` (${notVal})` : ""}.`;
-  }
-  return `${kim}: ${ifade}${notVal ? ` — ${notVal}` : ""}.`;
-}
-
-function buildPersonalRemindersParagraph(remindersMd, todayDate, withinDays = 14) {
-  const olaylar = getUpcoming(remindersMd, withinDays, todayDate);
-  if (!olaylar.length) return "";
-  return "Kişisel hatırlatmalara gelirsek; " + olaylar.map(cumle).join(" ");
-}
-
-// --------------------------------------------------------------------------- //
-// briefing_text.py portu
-// --------------------------------------------------------------------------- //
-
-const KNOWN_SECTION_HEADER_RE =
-  /^\s*[*_#]{0,3}\s*(giriş|hava\s*&\s*piyasa|hava\s+ve\s+piyasa|türkiye\s+gündemi|dünya\s+turu|teknoloji|kapanış)\s*[:：]\s*[*_#]{0,3}\s*/i;
-
-function weatherPhrases(w) {
-  w = w || {};
-  const phrases = {};
-  if (w.sicaklik_c != null) phrases.sicaklik = `${plainNumberToWords(w.sicaklik_c)} derece`;
-  if (w.aciklama) phrases.havaDurumuAciklamasi = w.aciklama;
-  if (w.nem_yuzde != null) phrases.nemOrani = percentToWords(w.nem_yuzde);
-  if (w.ruzgar_kmh != null) phrases.ruzgarHizi = `saatte ${plainNumberToWords(w.ruzgar_kmh)} kilometre`;
-  if (w.bugun_max_c != null) phrases.bugunEnYuksekSicaklik = `${plainNumberToWords(w.bugun_max_c)} derece`;
-  if (w.bugun_min_c != null) phrases.bugunEnDusukSicaklik = `${plainNumberToWords(w.bugun_min_c)} derece`;
-  return phrases;
-}
-
-function financePhrases(f) {
-  f = f || {};
-  const phrases = {};
-  if (f.usd_try_satis != null) phrases.dolarTlSatisKuru = currencyToWords(f.usd_try_satis);
-  if (f.bist100 != null) phrases.bist100Endeksi = `${plainNumberToWords(f.bist100)} puan`;
-  if (f.bist100_gunluk_yuzde_degisim != null) phrases.bist100GunlukDegisim = percentToWords(f.bist100_gunluk_yuzde_degisim);
-  if (f.gram_altin_try != null) phrases.gramAltinFiyati = currencyToWords(f.gram_altin_try);
-  if (f.btc_try != null) phrases.bitcoinTlKarsiligi = `${plainNumberToWords(f.btc_try)} lira`;
-  if (f.btc_usd != null) phrases.bitcoinDolarKarsiligi = `${plainNumberToWords(f.btc_usd)} dolar`;
-  return phrases;
-}
-
-// briefing_text.py'deki build_outfit_sentence'ın birebir karşılığı: erkek
-// kullanıcı için hava verisine göre "bugün ne giysem" önerisi (kadın kıyafeti yok).
-function topClothing(low, high) {
-  if (low < 5) return "üstüne kalın bir mont ya da kaban, altına kazak";
-  if (high < 15) return "üstüne mont ya da kalın bir ceket, altına sweatshirt";
-  if (high < 22) return "üstüne ince bir ceket ya da uzun kollu gömlek";
-  return "tişört ya da hafif bir gömlek";
-}
-
-function bottomClothing(high) {
-  if (high >= 27) return "kısa pantolon ya da ince chino";
-  return "uzun pantolon, chino ya da kot";
-}
-
-function buildOutfitSentence(weatherData) {
-  const w = weatherData || {};
-  const high = w.bugun_max_c ?? w.sicaklik_c;
-  const low = w.bugun_min_c ?? w.sicaklik_c;
-  if (high == null || low == null) return "";
-
-  const description = (w.aciklama || "").toLowerCase();
-  const wind = w.ruzgar_kmh ?? 0;
-
-  const items = [topClothing(low, high), bottomClothing(high)];
-  if (high - low >= 10) items.push("gün içinde hava çok değişecek, katmanlı giyin");
-  if (["yağmur", "çisenti", "sağanak", "fırtına", "dolu"].some((word) => description.includes(word))) {
-    items.push("yanına yağmurluk ya da su geçirmez bir mont al");
-  } else if (description.includes("kar")) {
-    items.push("su geçirmez bot ve eldiven tercih et");
-  }
-  if (wind >= 30) items.push("rüzgar sert, rüzgarlık da işine yarar");
-  if (high >= 22 && (description.includes("açık") || description.includes("az bulutlu"))) {
-    items.push("güneş gözlüğü de al");
-  }
-  return `Bugün ne giysen; ${items.join("; ")}.`;
-}
-
-function buildWeatherFinanceParagraph(weatherData, financeData) {
-  const w = weatherPhrases(weatherData);
-  const f = financePhrases(financeData);
-  const sentences = [];
-
-  if (w.havaDurumuAciklamasi && w.sicaklik) {
-    let sentence = `Hava durumuna gelirsek; İstanbul Çatalca'da hava ${w.havaDurumuAciklamasi.toLowerCase()}, sıcaklık ${w.sicaklik}`;
-    if (w.nemOrani) sentence += `, nem oranı ${w.nemOrani}`;
-    if (w.ruzgarHizi) sentence += `, rüzgar hızı ${w.ruzgarHizi}`;
-    sentences.push(sentence + ".");
-  }
-
-  const outfitSentence = buildOutfitSentence(weatherData);
-  if (outfitSentence) sentences.push(outfitSentence);
-
-  const financeBits = [];
-  if (f.dolarTlSatisKuru) financeBits.push(`dolar ${f.dolarTlSatisKuru} seviyesinde`);
-  if (f.bist100Endeksi) {
-    let bistBit = `BIST 100 endeksi ${f.bist100Endeksi}`;
-    if (f.bist100GunlukDegisim) bistBit += ` ile günü ${f.bist100GunlukDegisim} değişimle tamamlıyor`;
-    financeBits.push(bistBit);
-  }
-  if (f.gramAltinFiyati) financeBits.push(`gram altın ${f.gramAltinFiyati}`);
-  if (f.bitcoinTlKarsiligi) {
-    let btcBit = `Bitcoin ${f.bitcoinTlKarsiligi}`;
-    if (f.bitcoinDolarKarsiligi) btcBit += ` (${f.bitcoinDolarKarsiligi})`;
-    financeBits.push(btcBit);
-  }
-  if (financeBits.length) sentences.push("Piyasalara bakacak olursak; " + financeBits.join(", ") + ".");
-
-  return sentences.join(" ");
-}
-
-function buildEventsParagraph(events) {
-  if (!events || !events.length) return "";
-  const bits = events.map((e) => e.title);
-  return "Öne çıkan etkinliklere gelirsek; " + bits.join(", ") + ".";
+  return {
+    greeting: "İyi geceler",
+    roleDesc: "Kullanıcıya gece sonu kısa özet ve yarına hazırlık brifingi hazırlıyorsun.",
+    closingHint: "Dinlenmeyi hatırlatan ve yarınki güne huzurlu bir başlangıç dileyen kısa tek bir kapanış cümlesi kur.",
+  };
 }
 
 function stripKnownSectionHeaders(text) {
-  return text
+  return String(text || "")
     .split("\n")
     .map((line) => line.replace(KNOWN_SECTION_HEADER_RE, ""))
     .join("\n");
 }
 
-function assembleFinalBriefing(llmText, weatherData, financeData, remindersMd, todayDate, events) {
-  const text = stripKnownSectionHeaders(llmText);
-  const paragraphs = text.split("\n\n").map((p) => p.trim()).filter(Boolean);
-
-  const weatherFinanceParagraph = buildWeatherFinanceParagraph(weatherData, financeData);
-  const personalRemindersParagraph = remindersMd ? buildPersonalRemindersParagraph(remindersMd, todayDate) : "";
-  const eventsParagraph = buildEventsParagraph(events);
-
-  let insertAt = 1;
-  if (paragraphs.length && weatherFinanceParagraph) {
-    paragraphs.splice(insertAt, 0, weatherFinanceParagraph);
-    insertAt += 1;
-  } else if (weatherFinanceParagraph) {
-    paragraphs.push(weatherFinanceParagraph);
+function buildEventsTelegram(events, lengthMode = "balanced") {
+  if (!events || !events.length) return "";
+  const cap = lengthMode === "short" ? 1 : lengthMode === "detailed" ? 3 : 2;
+  const seen = new Set();
+  const unique = [];
+  for (const e of events) {
+    const t = String(e.title || "").trim();
+    if (!t || seen.has(t.toLowerCase())) continue;
+    seen.add(t.toLowerCase());
+    unique.push(t);
+    if (unique.length >= cap) break;
   }
-
-  if (paragraphs.length && personalRemindersParagraph) {
-    paragraphs.splice(insertAt, 0, personalRemindersParagraph);
-    insertAt += 1;
-  } else if (personalRemindersParagraph) {
-    paragraphs.push(personalRemindersParagraph);
-  }
-
-  if (paragraphs.length && eventsParagraph) {
-    paragraphs.splice(insertAt, 0, eventsParagraph);
-  } else if (eventsParagraph) {
-    paragraphs.push(eventsParagraph);
-  }
-
-  return paragraphs.join("\n\n");
+  if (!unique.length) return "";
+  return "🎟️ Öne Çıkan Etkinlikler:\n" + unique.map((t) => `• ${t}`).join("\n");
 }
 
-// --------------------------------------------------------------------------- //
-// prompts.DAILY_BRIEFING_PROMPT portu
-// --------------------------------------------------------------------------- //
-
-function buildBriefingPrompt({ location, time, newsItemsText, espriTalimatiText, arkadaslikTalimatiText }) {
+function buildBriefingPrompt({
+  location,
+  time,
+  newsItemsText,
+  espriTalimatiText,
+  arkadaslikTalimatiText,
+  hitapTalimatiText,
+  lengthTalimatiText,
+  timeCtx,
+  focusHint,
+}) {
   return `
-Sen kişisel bir sesli asistansın. Kullanıcıya gün sonu sesli brifingi hazırlayacaksın.
+Sen kişisel bir yaşam koordinatörü asistansın. ${timeCtx.roleDesc}
 
 GİRDİLER:
 - Kullanıcı Konumu ve Saat: ${location}, ${time}
-- Ham Haber Akışı (bazı başlıklar İngilizce olabilir): ${newsItemsText}
+- Bugünün Somut Odağı (kapanış cümlesi için ipucu): ${focusHint}
+- Önceliklendirilmiş Seçilmiş Haber Akışı (bazı başlıklar İngilizce olabilir):
+${newsItemsText}
 
-ÖNEMLİ — Hava durumu ve piyasa (dolar, altın, BIST, Bitcoin) bilgisi SANA
-VERİLMİYOR ve bu yüzden onlardan HİÇ bahsetmeyeceksin. "Hava & Piyasa" bölümü
-tamamen senin çıktının dışında, ayrıca ve zaten doğru şekilde seslendirilmiş
-olarak otomatik eklenecek. Sakın hava durumu, sıcaklık, dolar, altın, BIST
-veya Bitcoin ile ilgili tek bir kelime bile yazma — bu konuda elindeki tek
-bilgi bu paragraftır, başka hiçbir veri yok.
+ÖNEMLİ — Hava durumu, piyasa, kişisel görevler, vardiya ve İngilizce kartı bölümleri
+SANA VERİLMİYOR ve senin çıktının arasına deterministik olarak kod tarafından eklenecek.
+Sakın hava durumu, sıcaklık, dolar, altın, BIST, Bitcoin, vardiya saati veya uydurma bir
+görev hakkında tek bir kelime bile yazma.
 
 KURALLAR:
-1. SESLENDİRME (TTS) UYUMLULUĞU: Metin sesli okunacağı için ham haber akışından
-   aktardığın bilgilerdeki RAKAM, FİYAT VE YÜZDELERİ YAZIYLA YAZ (haberlerde geçen
-   tarih/sayı/para birimi gibi değerler dahil). Çıktıda hiçbir rakam (0-9) veya
-   sembol (%, ₺, $, TL) ham haliyle YER ALMAMALI.
-   - Örnek: "49.61 TL" yerine "kırk dokuz lira altmış bir kuruş"
-   - Örnek: "%1.5" yerine "yüzde bir virgül beş"
-   - Örnek: "6588" yerine "altı bin beş yüz seksen sekiz"
-2. TIK TUZAĞI (CLICKBAIT) FİLTRESİ: Ham haber akışı zaten önceden filtrelenmiştir, ama
-   yine de belirsizlik içeren veya gerçek bir bilgi taşımayan başlıklar varsa bunları
-   da ele. Yalnızca net bilgi içeren haberleri seç; her bölüm için aşağıda belirtilen
-   sayıya uy.
-3. DİL: Nihai çıktının TAMAMI Türkçe olmalı. İngilizce bir haber başlığı/özeti
-   görürsen onu kendi cümlelerinle Türkçeye çevirerek anlat; İngilizce tek kelime
-   bile bırakma (özel isimler/şirket adları hariç).
-4. PERSONA & TON: Dashboard > Ayarlar sayfasındaki yüzde kaydırıcılarından gelen şu
-   kişilik talimatlarına uy:
+1. SAYI VE SEMBOLLER: Telegram ekranında okunacağı için tarih, yüzde ve sayıları doğal, okunaklı biçimde yazabilirsin.
+2. DİL VE HABER SEÇİMİ: Nihai çıktının TAMAMI akıcı, doğal Türkçe olmalı. İngilizce başlıkları (ör. Airbus, Boeing, yapay zeka veya yazılım haberlerini) doğal Türkçeye çevirerek özetle; şirket/model/özel isimler dışında İngilizce kelime bırakma. ${lengthTalimatiText}
+3. PERSONA VE HİTAP:
+   - Hitap kuralı: ${hitapTalimatiText}
    - Espri: ${espriTalimatiText}
    - Arkadaş canlısı yaklaşım: ${arkadaslikTalimatiText}
-   Kullanıcıya doğrudan "Patron" diye hitap et (örn. "Patron, piyasalarda bugün...").
-   "Patron" kelimesi metin boyunca en az iki kez geçmeli.
-   - ZAMANA UYGUN SELAMLAMA: Girdideki saat değerinden saati belirle ve selamlamada
-     SADECE o saat aralığına uyan ifadeyi kullan — asla sabit olarak "Günaydın" yazma:
-       * 05:00–11:59 arası: "Günaydın"
-       * 12:00–17:59 arası: "Tünaydın"
-       * 18:00–21:59 arası: "İyi akşamlar"
-       * 22:00–04:59 arası: "İyi geceler"
-5. İÇERİK AKIŞI: Aşağıdaki sırayla ve içerikle TEK, akıcı bir metin kur. Bu başlıkları
-   (Giriş:, Hava & Piyasa: vb.) çıktıya YAZMA — bunlar sadece senin iç kurgun için bir
-   sıralama rehberidir:
-   - Giriş: Yukarıdaki ZAMANA UYGUN SELAMLAMA kuralına göre seçtiğin selamlama
-     ifadesiyle başlayan, "Patron" hitabı içeren hafif espritüel bir selamlama.
-     SADECE selamla; hava durumu veya piyasadan hiç bahsetme (bkz. yukarıdaki ÖNEMLİ not).
-   - Türkiye Gündemi: Ham haber akışındaki "TÜRKİYE" etiketli haberlerden en önemli
-     2-3 gelişmenin 1'er cümlelik özeti.
-   - Dünya Turu: Ham haber akışındaki "DÜNYA" etiketli haberlerden çarpıcı 2 gelişme.
-   - Teknoloji: Ham haber akışındaki "TEKNOLOJİ" etiketli haberlerden yapay zeka veya
-     teknoloji dünyasından 1-2 gelişme.
-   - Kapanış: Zamana uygun, espritüel bir kapanış cümlesi. Saate göre:
-       * Öğleden sonra (12:00–17:59): "Günün ikinci yarısı bizi bekliyor, kolay gelsin
-         Patron." benzeri enerji verici bir ifade kullan.
-       * Gece (22:00–04:59): "Vücudunu artık dinlendirmelisin, geç oldu Patron."
-         benzeri dinlenmeyi hatırlatan bir ifade kullan.
-       * Diğer saatlerde (sabah/akşam) duruma uygun, benzer ruhta espritüel bir
-         kapanış cümlesi üret.
-6. ÇIKTI FORMATI: Sadece seslendirilecek düz metni yaz. Başlık, madde işareti,
-   markdown, emoji veya açıklama ekleme. Bölümler arasında birer boş satır
-   bırakarak doğal duraklama noktaları oluştur.
+   - Selamlama ifadesi olarak "${timeCtx.greeting}" ile başla.
+4. İÇERİK AKIŞI (Aralarında birer boş satır bırakarak TAM OLARAK 3 bölüm yaz; bölüm başlıklarını çıktıya ASLA yazma):
+   - 1. Paragraf (Giriş): "${timeCtx.greeting}" ile başlayan, hitap kuralına uyan tek cümlelik kısa ve doğal bir açılış.
+   - 2. Paragraf (Seçilmiş Gündem): Yukarıdaki önceliklendirilmiş haberleri (Havacılık, Yapay Zeka/Yazılım ve Türkiye/Dünya gündemi) tekrar etmeden, tek veya en fazla iki akıcı paragrafta özetle.
+   - Son Paragraf (Odaklı Kapanış): Basmakalıp motivasyon sözleri yerine "${focusHint}" odağına atıf yapan ${timeCtx.closingHint}
+5. ÇIKTI FORMATI: Başlık, madde işareti, markdown veya emoji ekleme; bölümler arasında yalnızca birer boş satır bırak.
 
 Brifing:`;
 }
-
-// --------------------------------------------------------------------------- //
-// Groq çağrısı — index.js'teki classifyMessage ile AYNI model/endpoint,
-// burada düz metin (JSON değil) döndüğü için küçük bir yeniden deneme eklendi
-// (telegram_briefing.generate_daily_briefing'in Ollama bekleme mantığının
-// Groq için sadeleştirilmiş karşılığı).
-// --------------------------------------------------------------------------- //
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -684,7 +794,7 @@ async function callGroqPlainText(env, prompt, retries = 3) {
         body: JSON.stringify({
           model: env.GROQ_MODEL || "openai/gpt-oss-120b",
           messages: [{ role: "user", content: prompt }],
-          temperature: 0.7,
+          temperature: 0.65,
         }),
       });
       const data = await res.json();
@@ -699,54 +809,36 @@ async function callGroqPlainText(env, prompt, retries = 3) {
   throw lastError;
 }
 
+const BRIEFING_NOTES_SELECT = `
+  SELECT n.*,
+         a.appt_date, a.appt_time, a.location, a.related_person,
+         s.product_name, s.quantity,
+         r.remind_at, r.repeat_frequency, r.notified_at,
+         t.due_date, t.context
+  FROM notes n
+  LEFT JOIN appointments a ON a.note_id = n.id
+  LEFT JOIN shopping_items s ON s.note_id = n.id
+  LEFT JOIN reminders r ON r.note_id = n.id
+  LEFT JOIN tasks t ON t.note_id = n.id
+  WHERE n.completed = 0
+`;
+
 // --------------------------------------------------------------------------- //
-// Orkestrasyon — telegram_briefing.py main()/build_briefing_text() portu.
+// Orkestrasyon — sabah 05:00 cron'u ve /brifing komutu
 // --------------------------------------------------------------------------- //
 
 export async function generateAndSendDailyBriefing(env) {
-  let weatherData = {};
-  try {
-    weatherData = await fetchWeatherForBriefing();
-  } catch (e) {
-    console.error("Hava durumu alınamadı, brifing havasız devam edecek:", e);
-  }
-
-  let financeData = {};
-  try {
-    financeData = await fetchFinance();
-  } catch (e) {
-    console.error("Piyasa verisi alınamadı, brifing piyasasız devam edecek:", e);
-  }
-
-  let newsItemsText = "(Haber akışı alınamadı.)";
-  try {
-    newsItemsText = await fetchNewsItemsText();
-  } catch (e) {
-    console.error("Haber akışı alınamadı:", e);
-  }
-
-  const remindersRow = await env.DB.prepare(
-    "SELECT content FROM vault_notes WHERE path = ?"
-  )
-    .bind("50_Rutinler/Doğum Günleri ve Randevular.md")
-    .first();
-  const remindersMd = remindersRow?.content || "";
   const espriPct = parseInt(await getConfigValue(env.DB, "persona_espri_pct", "50"), 10);
   const arkadasPct = parseInt(await getConfigValue(env.DB, "persona_arkadas_pct", "50"), 10);
-  const eventsMinPriority = await getConfigValue(env.DB, "briefing_events_min_priority", "high");
+  const hitapMode = (await getConfigValue(env.DB, "persona_hitap_sekli", "onur")) || "onur";
+  const lengthMode = (await getConfigValue(env.DB, "briefing_length_mode", "balanced")) || "balanced";
+  const financeMode = (await getConfigValue(env.DB, "briefing_finance_mode", "significant")) || "significant";
+  const learningEnabledRaw = await getConfigValue(env.DB, "briefing_learning_card_enabled", "1");
+  const learningEnabled = learningEnabledRaw !== "0" && learningEnabledRaw !== "false";
+  const shiftOverride = (await getConfigValue(env.DB, "shift_manual_override", "")) || "";
+  const eventsMinPriority = (await getConfigValue(env.DB, "briefing_events_min_priority", "high")) || "high";
 
-  let events = [];
-  try {
-    events = await getPrioritizedEvents({
-      minPriority: eventsMinPriority,
-      tmdbApiKey: env.TMDB_API_KEY,
-      footballApiKey: env.FOOTBALL_API_KEY,
-    });
-  } catch (e) {
-    console.error("Önemli etkinlikler alınamadı, brifing bu bölümsüz devam edecek:", e);
-  }
-
-  const now = new Date(Date.now() + 3 * 60 * 60 * 1000); // Istanbul duvar saati (UTC+3)
+  const now = new Date(Date.now() + 3 * 60 * 60 * 1000);
   const todayParts = {
     year: now.getUTCFullYear(),
     month: now.getUTCMonth() + 1,
@@ -756,7 +848,34 @@ export async function generateAndSendDailyBriefing(env) {
     weekdayMon0: (now.getUTCDay() + 6) % 7,
   };
   const todayDate = tryMakeDate(todayParts.year, todayParts.month, todayParts.day);
+  const todayIso = toIsoDateUtc(todayDate);
   const timeStr = formatTrDateTime(todayParts);
+
+  const [weatherRes, financeRes, newsRes, eventsRes, vaultMapRes, activeNotesRes] = await Promise.allSettled([
+    fetchWeatherForBriefing(),
+    fetchFinance(),
+    fetchNewsItemsText(env.DB, lengthMode),
+    getPrioritizedEvents({
+      minPriority: eventsMinPriority,
+      withinDays: 7,
+      tmdbApiKey: env.TMDB_API_KEY,
+      footballApiKey: env.FOOTBALL_API_KEY,
+    }),
+    fetchAllowlistedVaultMap(env.DB),
+    env.DB.prepare(BRIEFING_NOTES_SELECT).all(),
+  ]);
+
+  const weatherData = weatherRes.status === "fulfilled" ? weatherRes.value : {};
+  const financeData = financeRes.status === "fulfilled" ? financeRes.value : {};
+  const newsItemsText = newsRes.status === "fulfilled" ? newsRes.value : "(Haber akışı alınamadı.)";
+  const events = eventsRes.status === "fulfilled" ? eventsRes.value : [];
+  const vaultMap = vaultMapRes.status === "fulfilled" ? vaultMapRes.value : new Map();
+  const activeNotes = activeNotesRes.status === "fulfilled" ? activeNotesRes.value?.results || [] : [];
+
+  const shiftInfo = resolveShiftForDate(todayDate, shiftOverride);
+  const coordData = collectPersonalCoordinationData(activeNotes, vaultMap, todayDate, lengthMode);
+  const focusHint = coordData.primaryFocus || shiftInfo.label;
+  const timeCtx = briefingTimeContext(todayParts.hour);
 
   const prompt = buildBriefingPrompt({
     location: LOCATION,
@@ -764,12 +883,74 @@ export async function generateAndSendDailyBriefing(env) {
     newsItemsText,
     espriTalimatiText: espriTalimati(espriPct),
     arkadaslikTalimatiText: arkadaslikTalimati(arkadasPct),
+    hitapTalimatiText: hitapTalimati(hitapMode),
+    lengthTalimatiText: lengthTalimati(lengthMode),
+    timeCtx,
+    focusHint,
   });
 
   try {
-    const llmText = await callGroqPlainText(env, prompt);
-    const finalText = assembleFinalBriefing(llmText, weatherData, financeData, remindersMd, todayDate, events);
-    await sendTelegramMessage(env, env.TELEGRAM_CHAT_ID, finalText);
+    const llmRaw = await callGroqPlainText(env, prompt);
+    const cleaned = stripKnownSectionHeaders(llmRaw);
+    const llmParagraphs = cleaned
+      .split("\n\n")
+      .map((p) => p.trim())
+      .filter(Boolean);
+
+    const greetingP = llmParagraphs[0] || "";
+    let closingP = llmParagraphs.length >= 2 ? llmParagraphs[llmParagraphs.length - 1] : "";
+    let newsParagraphs =
+      llmParagraphs.length >= 3
+        ? llmParagraphs.slice(1, -1)
+        : llmParagraphs.length === 2
+        ? [llmParagraphs[1]]
+        : [];
+    if (llmParagraphs.length === 2 && llmParagraphs[1].length <= 180) {
+      newsParagraphs = [];
+    } else if (llmParagraphs.length === 2 && llmParagraphs[1].length > 180) {
+      closingP = "";
+    }
+
+    const personalP = buildPersonalCoordinationTelegram(coordData);
+    const workdayP = buildWorkdayPrepTelegram(
+      todayDate,
+      todayParts.hour,
+      todayParts.weekdayMon0,
+      shiftOverride,
+      lengthMode,
+      vaultMap
+    );
+    const weatherP = buildSmartWeatherTelegram(weatherData, shiftInfo.code);
+    const financeP = buildConditionalFinanceTelegram(financeData, financeMode);
+    const eventsP = buildEventsTelegram(events, lengthMode);
+    const weeklyProjP = buildWeeklyProjectTelegram(todayDate, todayParts.weekdayMon0, lengthMode, vaultMap);
+
+    let learningP = "";
+    let learningMarkup = null;
+    if (learningEnabled) {
+      const vaultEngMd = vaultMap.get(VAULT_ENGLISH_WORDS_PATH) || "";
+      const card = await selectDailyLearningCard(env.DB, todayIso, vaultEngMd);
+      if (card) {
+        learningP = formatLearningCardTelegram(card);
+        learningMarkup = buildLearningCardInlineMarkup(card);
+      }
+    }
+
+    const blocks = [];
+    if (greetingP) blocks.push(greetingP);
+    for (const b of [personalP, workdayP, weatherP, financeP, eventsP]) {
+      if (b) blocks.push(b);
+    }
+    if (newsParagraphs.length) {
+      blocks.push("🗞️ Seçilmiş Gündem:\n" + newsParagraphs.join("\n\n"));
+    }
+    if (learningP) blocks.push(learningP);
+    if (weeklyProjP) blocks.push(weeklyProjP);
+    if (closingP) blocks.push(closingP);
+
+    const finalText = blocks.join("\n\n");
+    const msgOptions = learningMarkup ? { replyMarkup: learningMarkup } : {};
+    await sendTelegramMessage(env, env.TELEGRAM_CHAT_ID, finalText, msgOptions);
   } catch (e) {
     console.error("Brifing üretilemedi:", e);
     await sendTelegramMessage(env, env.TELEGRAM_CHAT_ID, `⚠️ Günlük brifing oluşturulamadı: ${e}`);
@@ -777,8 +958,7 @@ export async function generateAndSendDailyBriefing(env) {
 }
 
 // --------------------------------------------------------------------------- //
-// POST /config — WinVoice'un (cloud_sync.push_config()) persona ayarlarını
-// PC açıldığında buraya itmesi için.
+// POST /config — Masaüstü WinVoice ayarlarının buluta senkronizasyonu
 // --------------------------------------------------------------------------- //
 
 export async function handleConfigPost(request, env) {
@@ -788,14 +968,21 @@ export async function handleConfigPost(request, env) {
   }
 
   const body = await request.json();
-  if (body.persona_espri_pct !== undefined) {
-    await setConfigValue(env.DB, "persona_espri_pct", String(body.persona_espri_pct));
-  }
-  if (body.persona_arkadas_pct !== undefined) {
-    await setConfigValue(env.DB, "persona_arkadas_pct", String(body.persona_arkadas_pct));
-  }
-  if (body.briefing_events_min_priority !== undefined) {
-    await setConfigValue(env.DB, "briefing_events_min_priority", String(body.briefing_events_min_priority));
+  const allowedKeys = [
+    "persona_espri_pct",
+    "persona_arkadas_pct",
+    "persona_hitap_sekli",
+    "briefing_length_mode",
+    "briefing_finance_mode",
+    "briefing_learning_card_enabled",
+    "shift_manual_override",
+    "briefing_events_min_priority",
+  ];
+
+  for (const key of allowedKeys) {
+    if (body[key] !== undefined) {
+      await setConfigValue(env.DB, key, String(body[key]));
+    }
   }
 
   return new Response(JSON.stringify({ ok: true }), { headers: { "Content-Type": "application/json" } });

@@ -9,6 +9,7 @@ import {
   editTelegramMessage,
   answerCallbackQuery,
   nowIstanbulIso,
+  setConfigValue,
 } from "./common.js";
 import {
   TR_MONTHS,
@@ -20,17 +21,21 @@ import {
   isStaleMetaRow,
 } from "./knowledge.js";
 import { generateAndSendDailyBriefing } from "./briefing.js";
+import { normalizeShiftCode, renderShiftMenu, toIsoDateUtc } from "./briefing_coordinator.js";
+import { recordLearningFeedbackD1 } from "./learning.js";
 
 export const NOTES_SELECT = `
   SELECT n.*,
          a.appt_date, a.appt_time, a.location, a.related_person,
          s.product_name, s.quantity,
          r.remind_at, r.repeat_frequency, r.notified_at,
+         t.due_date, t.context,
          m.telegram_update_id
   FROM notes n
   LEFT JOIN appointments a ON a.note_id = n.id
   LEFT JOIN shopping_items s ON s.note_id = n.id
   LEFT JOIN reminders r ON r.note_id = n.id
+  LEFT JOIN tasks t ON t.note_id = n.id
   LEFT JOIN telegram_messages m ON m.id = n.telegram_message_id
 `;
 
@@ -41,17 +46,28 @@ export const NOTES_SELECT = `
 export function resolveMenuIntent(rawText) {
   if (!rawText) return null;
   let text = String(rawText).trim();
+  let argText = "";
 
   // Komut formatındaki bot etiketini temizle: "/menu@OnurBriefBot" -> "/menu"
   if (text.startsWith("/")) {
     const parts = text.split(/\s+/);
     text = parts[0].split("@")[0];
+    argText = parts.slice(1).join(" ").trim();
   }
 
   const clean = trLower(text).trim();
 
   if (["/start", "/menu", "/help", "menü", "menu", "yardım", "yardim"].includes(clean)) {
     return "welcome";
+  }
+  if (["/vardiya", "vardiya", "vardiyam", "🛫 vardiyam"].includes(clean)) {
+    if (argText) {
+      const lowArg = trLower(argText);
+      if (["auto", "otomatik", "sıfırla", "sifirla"].includes(lowArg)) return "shift:auto";
+      const code = normalizeShiftCode(argText);
+      if (code) return `shift:${code}`;
+    }
+    return "shift";
   }
   if (["🛒 alışveriş listem", "alışveriş listem", "alisveris listem", "/alisveris", "alisveris"].includes(clean)) {
     return "shopping";
@@ -284,8 +300,8 @@ export async function renderPendingTasks(db) {
   const rows = await db
     .prepare(
       NOTES_SELECT +
-        " WHERE n.category = 'reminder' AND n.completed = 0 " +
-        "ORDER BY n.created_at ASC"
+        " WHERE n.category IN ('reminder', 'task') AND n.completed = 0 " +
+        "ORDER BY CASE WHEN n.priority = 'high' THEN 0 ELSE 1 END, n.created_at ASC"
     )
     .all();
 
@@ -308,12 +324,16 @@ export async function renderPendingTasks(db) {
 
   const lines = cleanRows.map((r, i) => {
     const title = (r.title || "İş").trim();
+    const prio = r.priority === "high" ? "🔴 " : "";
+    const ctx = r.context ? ` [${r.context}]` : "";
     const desc = r.description && trLower(r.description) !== trLower(title) ? ` — ${r.description}` : "";
     let timeHint = "";
-    if (r.remind_at && trLower(r.remind_at) !== "yok") {
+    if (r.due_date && trLower(r.due_date) !== "yok") {
+      timeHint = `\n   📅 Son tarih: ${r.due_date}`;
+    } else if (r.remind_at && trLower(r.remind_at) !== "yok") {
       timeHint = `\n   🕒 Hatırlatma: ${r.remind_at}`;
     }
-    return `${i + 1}. ${title}${desc}${timeHint}`;
+    return `${i + 1}. ${prio}${title}${ctx}${desc}${timeHint}`;
   });
 
   const text =
@@ -359,6 +379,7 @@ export async function renderDatabaseSummary(db) {
 
   const counts = {
     shopping: { active: 0, done: 0 },
+    task: { active: 0, done: 0 },
     reminder: { active: 0, done: 0 },
     appointment: { active: 0, done: 0 },
     general: { active: 0, done: 0 },
@@ -377,7 +398,8 @@ export async function renderDatabaseSummary(db) {
 
   const iconMap = {
     shopping: "🛒",
-    reminder: "✅",
+    task: "✅",
+    reminder: "⏰",
     appointment: "📌",
     general: "📝",
   };
@@ -391,7 +413,8 @@ export async function renderDatabaseSummary(db) {
     `🗄️ Veritabanı Özeti & Sistem Durumu:\n\n` +
     `📊 Aktif Notlar Dağılımı:\n` +
     `• 🛒 Alışveriş: ${counts.shopping.active} aktif (${counts.shopping.done} tamamlanan)\n` +
-    `• ✅ İşler / Hatırlatmalar: ${counts.reminder.active} aktif (${counts.reminder.done} tamamlanan)\n` +
+    `• ✅ Görevler: ${counts.task.active} aktif (${counts.task.done} tamamlanan)\n` +
+    `• ⏰ Hatırlatmalar: ${counts.reminder.active} aktif (${counts.reminder.done} tamamlanan)\n` +
     `• 📌 Randevular: ${counts.appointment.active} aktif (${counts.appointment.done} tamamlanan)\n` +
     `• 📝 Genel Notlar: ${counts.general.active} aktif\n` +
     `────────────────────\n` +
@@ -518,7 +541,7 @@ export async function handleMenuIntent(intent, env, db, chatId, todayParts) {
       `• ✅ Bekleyen İşlerim — Yapılacaklar & tek dokunuşla tamamlama\n` +
       `• 🗄️ Veritabanı Özeti — Not sayıları ve arşiv durumu\n` +
       `• ⏳ Geçen Gün Hesapla — Önemli olayların üzerinden geçen gün hesabı\n\n` +
-      `📰 Anlık günlük brifing almak için sol alttaki [☰ Menü] çekmecesinden veya /brifing komutuyla talep edebilirsiniz.\n\n` +
+      `📰 Anlık günlük brifing için /brifing, R1D vardiya durumunuzu görmek veya değiştirmek için /vardiya komutunu kullanabilirsiniz.\n\n` +
       `Ayrıca bana doğrudan ses kaydı veya metin göndererek yeni not ekleyebilir, soru sorabilirsiniz!`;
 
     await sendTelegramMessage(env, chatId, text, { replyMarkup: MAIN_MENU_KEYBOARD });
@@ -542,6 +565,15 @@ export async function handleMenuIntent(intent, env, db, chatId, todayParts) {
     rendered = await renderDatabaseSummary(db);
   } else if (intent === "elapsed") {
     rendered = await renderElapsedDaysMenu(db, todayParts);
+  } else if (intent === "shift" || intent.startsWith("shift:")) {
+    if (intent.startsWith("shift:")) {
+      const arg = intent.slice("shift:".length);
+      const todayDate = tryMakeDate(todayParts.year, todayParts.month, todayParts.day);
+      const todayIso = toIsoDateUtc(todayDate);
+      const newVal = arg === "auto" ? "" : `${todayIso}:${arg}`;
+      await setConfigValue(db, "shift_manual_override", newVal);
+    }
+    rendered = await renderShiftMenu(db, todayParts);
   } else if (intent.startsWith("cal:")) {
     const mode = intent.slice(4) || "m0";
     rendered = await renderCalendarView(db, mode, todayParts);
@@ -564,27 +596,66 @@ export async function handleCallbackQuery(callbackQuery, env) {
     return;
   }
 
+  const shifted = new Date(Date.now() + 3 * 60 * 60 * 1000);
+  const todayParts = {
+    year: shifted.getUTCFullYear(),
+    month: shifted.getUTCMonth() + 1,
+    day: shifted.getUTCDate(),
+    hour: shifted.getUTCHours(),
+    minute: shifted.getUTCMinutes(),
+    weekdayMon0: (shifted.getUTCDay() + 6) % 7,
+  };
+
   // 1) Takvim Görünümü Sekme Değişimi
   if (data.startsWith("cal:")) {
     const mode = data.slice(4);
-    // Dinamik import veya yerel saat
-    const shifted = new Date(Date.now() + 3 * 60 * 60 * 1000);
-    const todayParts = {
-      year: shifted.getUTCFullYear(),
-      month: shifted.getUTCMonth() + 1,
-      day: shifted.getUTCDate(),
-      hour: shifted.getUTCHours(),
-      minute: shifted.getUTCMinutes(),
-      weekdayMon0: (shifted.getUTCDay() + 6) % 7,
-    };
-
     const rendered = await renderCalendarView(env.DB, mode, todayParts);
     await editTelegramMessage(env, chatId, messageId, rendered.text, rendered.inlineMarkup);
     await answerCallbackQuery(env, callbackQuery.id);
     return;
   }
 
-  // 2) Alışveriş Kalemi Tamamlama
+  // 2) R1D Vardiya Manuel Değiştirme (/vardiya inline butonları)
+  if (data.startsWith("shift:")) {
+    const code = data.slice("shift:".length);
+    const todayDate = tryMakeDate(todayParts.year, todayParts.month, todayParts.day);
+    const todayIso = toIsoDateUtc(todayDate);
+    const newVal = code === "auto" ? "" : `${todayIso}:${code}`;
+    await setConfigValue(env.DB, "shift_manual_override", newVal);
+    const rendered = await renderShiftMenu(env.DB, todayParts);
+    await editTelegramMessage(env, chatId, messageId, rendered.text, rendered.inlineMarkup);
+    const toast =
+      code === "auto"
+        ? "🔄 Otomatik R1D vardiya döngüsüne dönüldü."
+        : `✅ Bugünkü vardiya '${code}' olarak güncellendi!`;
+    await answerCallbackQuery(env, callbackQuery.id, toast);
+    return;
+  }
+
+  // 3) Günün İngilizce Kartı Aralıklı Tekrar Geri Bildirimi ([✅ Öğrendim] / [🔁 Tekrar Sor])
+  if (data.startsWith("learn:ok:") || data.startsWith("learn:again:")) {
+    const known = data.startsWith("learn:ok:");
+    const wordKey = data.slice(known ? "learn:ok:".length : "learn:again:".length);
+    const todayDate = tryMakeDate(todayParts.year, todayParts.month, todayParts.day);
+    const todayIso = toIsoDateUtc(todayDate);
+    const res = await recordLearningFeedbackD1(env.DB, wordKey, known, todayIso);
+    const badgeText = known
+      ? `✅ Öğrenildi: ${res.word} (Kutu ${res.box} · ${res.intervalDays}g sonra)`
+      : `🔁 Tekrar sorulacak: ${res.word} (Yarın)`;
+    const updatedMarkup = {
+      inline_keyboard: [[{ text: badgeText, callback_data: "noop" }]],
+    };
+    if (callbackQuery?.message?.text) {
+      await editTelegramMessage(env, chatId, messageId, callbackQuery.message.text, updatedMarkup);
+    }
+    const toast = known
+      ? `Harika! "${res.word}" Kutu ${res.box}'e taşındı (${res.intervalDays} gün sonra tekrar).`
+      : `"${res.word}" Kutu 1'de tutuldu, yarın tekrar sorulacak.`;
+    await answerCallbackQuery(env, callbackQuery.id, toast);
+    return;
+  }
+
+  // 4) Alışveriş Kalemi Tamamlama
   if (data.startsWith("done:shop:")) {
     const noteId = parseInt(data.slice("done:shop:".length), 10);
     if (noteId) {
