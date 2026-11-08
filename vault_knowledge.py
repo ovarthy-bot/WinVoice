@@ -284,6 +284,30 @@ def _format_db_note_document(n):
     }
 
 
+_H2_HEADING_RE = re.compile(r"(?m)^##\s+(.+?)\s*$")
+
+
+def _split_into_sections(content):
+    """Notu ## (H2) başlıklarına göre ayrı parçalara böler, böylece bir
+    dosyadaki birbirine benzeyen farklı bölümler (ör. iki ayrı "mail adresi"
+    listesi) arama sırasında tek bir dev blok olarak karışıp LLM'in yanlış
+    bölümden cevap seçmesine yol açmaz. H2 başlığı yoksa tüm içerik tek parça
+    olarak döner."""
+    matches = list(_H2_HEADING_RE.finditer(content))
+    if not matches:
+        return [(None, content)]
+
+    sections = []
+    intro = content[: matches[0].start()].strip()
+    if intro:
+        sections.append((None, intro))
+    for i, m in enumerate(matches):
+        start = m.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(content)
+        sections.append((m.group(1).strip(), content[start:end].strip()))
+    return sections
+
+
 def _load_documents():
     """Her çağrıda hem yerel kasa önbelleğini (vault_cache.py — HAKKIMDA) hem de
     yerel SQLite veritabanındaki (note_database.py — notes.db) notları birleşik
@@ -295,14 +319,16 @@ def _load_documents():
         vault_notes = []
 
     for note in vault_notes:
-        title_terms = _meaningful_terms(note["title"])
-        docs.append({
-            "path": note["path"],
-            "title": note["title"],
-            "content": note["content"],
-            "title_terms": title_terms,
-            "terms": title_terms | _meaningful_terms(note["content"]),
-        })
+        for heading, section_text in _split_into_sections(note["content"]):
+            display_title = f"{note['title']} — {heading}" if heading else note["title"]
+            title_terms = _meaningful_terms(display_title)
+            docs.append({
+                "path": note["path"],
+                "title": display_title,
+                "content": section_text,
+                "title_terms": title_terms,
+                "terms": title_terms | _meaningful_terms(section_text),
+            })
 
     try:
         db_notes = note_database.get_notes(category="all", include_completed=True)
@@ -431,8 +457,8 @@ def answer_from_vault(llm, user_text, qa_prompt_template, top_k=3, extra_search_
     blocks = []
     for item in results:
         content = item["content"]
-        if len(content) > 1500:
-            content = content[:1500]
+        if len(content) > 4000:
+            content = content[:4000]
         blocks.append(f"### {item['title']}\n{content}")
     notlar = "\n\n".join(blocks)
 
@@ -501,8 +527,8 @@ def answer_elapsed_days_from_vault(llm, user_text, elapsed_days_prompt_template,
     gun_sayisi = (bugun - hedef_tarih).days
     tarih_metni = f"{hedef_tarih.day:02d}.{hedef_tarih.month:02d}.{hedef_tarih.year}"
     not_icerigi = best["content"]
-    if len(not_icerigi) > 1500:
-        not_icerigi = not_icerigi[:1500]
+    if len(not_icerigi) > 4000:
+        not_icerigi = not_icerigi[:4000]
 
     prompt = elapsed_days_prompt_template.format(
         not_icerigi=not_icerigi, soru=user_text,

@@ -182,26 +182,51 @@ function setIntersection(a, b) {
   return res;
 }
 
+const H2_HEADING_RE = /^##\s+(.+?)\s*$/gm;
+
+// Notu ## (H2) başlıklarına göre ayrı parçalara böler, böylece bir dosyadaki
+// birbirine benzeyen farklı bölümler (ör. iki ayrı "mail adresi" listesi)
+// arama sırasında tek bir dev blok olarak karışıp LLM'in yanlış bölümden
+// cevap seçmesine yol açmaz. H2 başlığı yoksa tüm içerik tek parça döner.
+function splitIntoSections(content) {
+  const matches = [...content.matchAll(H2_HEADING_RE)];
+  if (matches.length === 0) return [[null, content]];
+
+  const sections = [];
+  const intro = content.slice(0, matches[0].index).trim();
+  if (intro) sections.push([null, intro]);
+  for (let i = 0; i < matches.length; i++) {
+    const start = matches[i].index;
+    const end = i + 1 < matches.length ? matches[i + 1].index : content.length;
+    sections.push([matches[i][1].trim(), content.slice(start, end).trim()]);
+  }
+  return sections;
+}
+
 export function searchVaultNotes(vaultRows, queryText, topK = 8) {
   const queryTerms = meaningfulTerms(queryText);
   if (queryTerms.size === 0 || !Array.isArray(vaultRows) || vaultRows.length === 0) {
     return [];
   }
 
-  const docs = vaultRows.map((row) => {
+  const docs = [];
+  for (const row of vaultRows) {
     const cleaned = cleanVaultContent(row.content);
-    const titleTerms = meaningfulTerms(row.title);
-    const contentTerms = meaningfulTerms(cleaned);
-    const terms = new Set([...titleTerms, ...contentTerms]);
-    return {
-      path: row.path,
-      title: row.title,
-      folder: row.folder || "",
-      content: cleaned,
-      titleTerms,
-      terms,
-    };
-  });
+    for (const [heading, sectionText] of splitIntoSections(cleaned)) {
+      const title = heading ? `${row.title} — ${heading}` : row.title;
+      const titleTerms = meaningfulTerms(title);
+      const contentTerms = meaningfulTerms(sectionText);
+      const terms = new Set([...titleTerms, ...contentTerms]);
+      docs.push({
+        path: row.path,
+        title,
+        folder: row.folder || "",
+        content: sectionText,
+        titleTerms,
+        terms,
+      });
+    }
+  }
 
   const nDocs = docs.length;
   const docFreq = new Map();
@@ -501,7 +526,7 @@ export function buildUnifiedQueryPrompt(question, noteRows, vaultRows, todayPart
 
   const matchedVault = searchVaultNotes(vaultRows || [], question, 8);
   const vaultBlocks = matchedVault.map((v) => {
-    const clipped = v.content.length > 1500 ? v.content.slice(0, 1500) + "…" : v.content;
+    const clipped = v.content.length > 4000 ? v.content.slice(0, 4000) + "…" : v.content;
     const diffHint = collectDateDiffHints(clipped, todayDate);
     return `### ${v.title} (${v.path})${diffHint}\n${clipped}`;
   });
