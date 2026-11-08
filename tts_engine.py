@@ -32,6 +32,12 @@ PIPER_MODELS_LIBRARY_DIR = os.path.join(PIPER_ENGINE_DIR, "piper_models_library"
 PIPER_VOICE_ID_PREFIX = "piper_model::"
 PIPER_MODEL_FILE_SUFFIXES = (".onnx", ".onnx.json", ".voice.txt")
 
+# EMA Lightning (bkz. ema_tts_engine.py): pyttsx3/SAPI'den bağımsız, yerel bir
+# ONNX modeli olduğu için gerçek bir SAPI token'ı değil, diğer seslerle aynı
+# {"id", "description"} biçiminde sabit bir giriş olarak listeye ekleniyor.
+EMA_VOICE_ID = "ema_lightning"
+EMA_VOICE_DESCRIPTION = "EMA Lightning - Türkçe (çevrimdışı, nöral)"
+
 
 def _piper_model_label(stem):
     """'tr_TR-fahrettin-medium' -> 'Fahrettin'. Piper'ın dosya adı kuralı
@@ -126,6 +132,14 @@ def list_turkish_voices():
                 voices.append({"id": token.Id, "description": description})
     except Exception as e:
         print(f"⚠️ Sesler listelenemedi: {e}")
+
+    try:
+        from ema_tts_engine import ema_tts
+        if ema_tts.available():
+            voices.append({"id": EMA_VOICE_ID, "description": EMA_VOICE_DESCRIPTION})
+    except Exception as e:
+        print(f"⚠️ EMA Lightning sesi listelenemedi: {e}")
+
     return voices
 
 
@@ -213,12 +227,27 @@ def _set_turkish_voice(engine):
 
 
 def _speak_once(texto):
-    """Tek bir pyttsx3 motoruyla, aynı süreç içinde metni okur."""
+    """Seçili ses EMA Lightning ise onunla, değilse pyttsx3 motoruyla, aynı
+    süreç içinde metni okur. EMA Lightning başarısız olursa (model dosyaları
+    eksik, onnxruntime hatası vb.) mevcut pyttsx3 sesine geri döner, böylece
+    asistan sessiz kalmaz."""
+    if get_selected_voice_id() == EMA_VOICE_ID:
+        try:
+            _speak_once_ema(texto)
+            return
+        except Exception as e:
+            print(f"⚠️ EMA Lightning sesi başarısız oldu, mevcut sese dönülüyor: {e}")
+
     engine = pyttsx3.init()
     _set_turkish_voice(engine)
     engine.say(texto)
     engine.runAndWait()
     engine.stop()
+
+
+def _speak_once_ema(texto):
+    from ema_tts_engine import speak as ema_speak
+    ema_speak(texto)
 
 
 def _speak_via_subprocess(texto, should_abort=None, poll_interval=0.15):

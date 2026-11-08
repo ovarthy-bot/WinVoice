@@ -8,3 +8,5 @@ pywin32
 faster-whisper
 av<14
 Pillow
+onnxruntime
+normalizer-tr
