@@ -10,3 +10,10 @@ av<14
 Pillow
 onnxruntime
 normalizer-tr
+# Not: kokoro-onnx eSpeak NG'yi (GPL-3.0-or-later) ve phonemizer'ı (GPL-3.0)
+# içeri taşıyor; projedeki diğer tüm bağımlılıklar MIT/Apache/BSD/PSF, bu
+# yüzden bu üç paket WinVoice'a yeni bir copyleft (GPL) çalışma zamanı
+# bağımlılığı ekliyor. Proje dağıtılmadığı için engelleyici değil, sadece not.
+kokoro-onnx
+espeakng-loader
+phonemizer

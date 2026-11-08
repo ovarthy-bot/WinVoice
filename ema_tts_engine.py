@@ -10,16 +10,16 @@
 # özgü model klasörü (models/ema_tr), EnglishPractice'e özel config.py ve
 # Kokoro tabanlı tts.py bağımlılıkları yerine kendi WAV yazıcısı, ve sesi
 # doğrudan winsound ile çalan speak().
-import io
 import json
 import logging
 import os
 import re
 import threading
 import unicodedata
-import wave
 
 import numpy as np
+
+import tts_wav_utils
 
 log = logging.getLogger(__name__)
 
@@ -99,17 +99,6 @@ def _downsample(x: np.ndarray, factor: int) -> np.ndarray:
     padded = np.concatenate([np.zeros(half), x.astype(np.float64), np.zeros(half + factor)])
     y = np.convolve(padded, taps, mode="valid")
     return y[::factor][:(len(x) + factor - 1) // factor].astype(np.float32)
-
-
-def _to_wav(samples: np.ndarray, rate: int) -> bytes:
-    pcm = (np.clip(samples, -1.0, 1.0) * 32767).astype("<i2")
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(rate)
-        w.writeframes(pcm.tobytes())
-    return buf.getvalue()
 
 
 # ---------------------------------------------------------------- model
@@ -208,15 +197,14 @@ class EMALightningTTS:
                 if pause:
                     out.append(np.zeros(round(pause * RATE), np.float32))
         audio = np.concatenate(out) if out else np.zeros(RATE // 10, np.float32)
-        return _to_wav(_downsample(audio, RATE // OUT_RATE), OUT_RATE)
+        return tts_wav_utils.to_wav(_downsample(audio, RATE // OUT_RATE), OUT_RATE)
 
 
 ema_tts = EMALightningTTS()
 
 
 def speak(text: str, speed: float = 1.0) -> None:
-    """Metni EMA Lightning ile üretir ve winsound üzerinden çalar (bellekten,
-    disk dosyası oluşturmadan). Çağrı, ses bitene kadar bloklar."""
-    import winsound
+    """Metni EMA Lightning ile üretir ve bellekten çalar. Çağrı, ses bitene
+    kadar bloklar."""
     wav_bytes = ema_tts.synthesize(text, speed=speed)
-    winsound.PlaySound(wav_bytes, winsound.SND_MEMORY)
+    tts_wav_utils.play_wav_bytes(wav_bytes)

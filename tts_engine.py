@@ -227,6 +227,25 @@ def _set_turkish_voice(engine):
 
 
 def _speak_once(texto):
+    """Metni önce lang_segmenter ile Türkçe/İngilizce parçalara ayırır (sözlük
+    kurulu değilse tamamı Türkçe sayılır, davranış değişmez), sonra her
+    parçayı sırayla uygun sesle okur: Türkçe parçalar mevcut EMA/pyttsx3
+    sesiyle, İngilizce parçalar Kokoro ile."""
+    import lang_segmenter
+    for seg in lang_segmenter.segments(texto):
+        text = seg["text"].strip()
+        if not text:
+            continue
+        if seg["lang"] == "en":
+            try:
+                _speak_once_kokoro(text)
+                continue
+            except Exception as e:
+                print(f"⚠️ Kokoro (İngilizce) sesi başarısız oldu, Türkçe sese dönülüyor: {e}")
+        _speak_once_turkish(text)
+
+
+def _speak_once_turkish(texto):
     """Seçili ses EMA Lightning ise onunla, değilse pyttsx3 motoruyla, aynı
     süreç içinde metni okur. EMA Lightning başarısız olursa (model dosyaları
     eksik, onnxruntime hatası vb.) mevcut pyttsx3 sesine geri döner, böylece
@@ -248,6 +267,13 @@ def _speak_once(texto):
 def _speak_once_ema(texto):
     from ema_tts_engine import speak as ema_speak
     ema_speak(texto)
+
+
+def _speak_once_kokoro(texto):
+    from kokoro_tts_engine import kokoro_tts, speak as kokoro_speak
+    if not kokoro_tts.available():
+        raise RuntimeError("Kokoro model dosyaları bulunamadı")
+    kokoro_speak(texto)
 
 
 def _speak_via_subprocess(texto, should_abort=None, poll_interval=0.15):

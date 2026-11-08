@@ -66,3 +66,7 @@ notes.db
 
 # Wrangler lokal durumu (D1 yerel kopyası, hesap önbelleği)
 .wrangler/
+
+# Çevrimdışı İngilizce sözlük (build_dictionary.py ile Wiktionary'den türetilir,
+# ~13 MB; her kurulumda yeniden inşa edilebildiği için repoya eklenmiyor)
+models/dictionary/
