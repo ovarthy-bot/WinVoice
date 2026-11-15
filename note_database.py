@@ -424,6 +424,18 @@ def mark_reminder_notified(note_id, notified_at=None):
         )
 
 
+def reschedule_reminder(note_id, next_remind_at):
+    """Vardiya bağımlı gibi TEKRARLI bir hatırlatmayı (bkz. shift_reminder_utils.py)
+    bir sonraki oluş zamanına taşır ve notified_at'i temizler, böylece
+    get_due_reminders() onu tekrar yakalayabilir — mark_reminder_notified'ın
+    tersine bu not asla 'bitmiş' sayılmaz."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE reminders SET remind_at = ?, notified_at = NULL WHERE note_id = ?",
+            (next_remind_at, note_id),
+        )
+
+
 # --------------------------------------------------------------------------- #
 # seen_news (Kişisel Haber Motoru tekrar engelleme hafızası)
 # --------------------------------------------------------------------------- #

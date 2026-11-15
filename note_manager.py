@@ -9,6 +9,7 @@
 from langchain_core.prompts import PromptTemplate
 
 import db_query_resolver
+import hakkimda_note_writer
 import note_classifier
 import note_database
 import notification_service
@@ -93,6 +94,12 @@ def _save_items(llm, chat_id, items, telegram_message_id, allow_clarification):
         )
         saved_note = note_database.get_note(note_id)
         notification_service.notify_note_saved(chat_id, saved_note)
+        try:
+            hakkimda_note_writer.write_note(saved_note)
+        except Exception as e:
+            # notes.db kaydı zaten güvende; kasaya yazım başarısız olsa da
+            # (ör. HAKKIMDA bir senkron tarafından kilitlenmişse) not kaybolmaz.
+            print(f"⚠️ Not HAKKIMDA kasasına yazılamadı (not zaten kayıtlı, id={note_id}): {e}")
 
     if unclear:
         question = _build_clarifying_question(unclear)

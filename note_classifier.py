@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 from langchain_core.prompts import PromptTemplate
 
+import shift_reminder_utils
 from prompts import NOTE_CLASSIFICATION_PROMPT
 
 _prompt_template = PromptTemplate.from_template(NOTE_CLASSIFICATION_PROMPT)
@@ -167,6 +168,36 @@ def _normalize_item(item):
     }
 
 
+def _shift_conditional_note(message_text):
+    """'15-23 vardiyasında olduğum günlerde saat 12:38'de ...' gibi vardiya
+    bağımlı, TEKRARLI hatırlatmaları LLM'e hiç sormadan deterministik olarak
+    yakalar (bkz. shift_reminder_utils.py) — LLM'in "15-23" gibi sabit bir
+    vardiya kodunu birebir, her seferinde doğru üretmesine güvenmek yerine.
+    Hem vardiya kodu hem saat metinde net şekilde geçmiyorsa None döner, yani
+    normal LLM akışına düşer."""
+    shift_code = shift_reminder_utils.detect_shift_code(message_text)
+    time_str = shift_reminder_utils.detect_time(message_text)
+    if not shift_code or not time_str:
+        return None
+
+    remind_at = shift_reminder_utils.first_occurrence_iso(shift_code, time_str)
+    if not remind_at:
+        return None
+
+    title = message_text.strip().splitlines()[0][:60] if message_text.strip() else "Vardiya hatırlatması"
+    return [{
+        "category": "reminder",
+        "confidence": "high",
+        "priority": "normal",
+        "title": title or "Vardiya hatırlatması",
+        "description": message_text.strip(),
+        "extra": {
+            "remind_at": remind_at,
+            "repeat_frequency": shift_reminder_utils.repeat_value(shift_code),
+        },
+    }]
+
+
 def classify_message(llm, message_text):
     """Ham Telegram mesajını sınıflandırıp, note_database.insert_note()'a
     doğrudan verilebilecek sözlüklerden oluşan bir liste döner. Ollama'dan
@@ -174,6 +205,10 @@ def classify_message(llm, message_text):
     düşük-güvenli "general" bir nota düşürür (bkz. _fallback_note)."""
     if not message_text or not message_text.strip():
         return []
+
+    shift_note = _shift_conditional_note(message_text)
+    if shift_note:
+        return shift_note
 
     prompt = _prompt_template.format(message_text=message_text, bugun=_current_date_hint())
     try:

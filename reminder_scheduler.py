@@ -5,11 +5,13 @@
 # deseniyle aynı şekilde yazılmıştır.
 
 import time
+from datetime import datetime
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
 import note_database
 import notification_service
+import shift_reminder_utils
 import telegram_settings
 
 CHECK_INTERVAL_SECONDS = 60
@@ -41,8 +43,24 @@ class ReminderSchedulerThread(QThread):
         due = note_database.get_due_reminders()
         for note in due:
             notification_service.notify_reminder_due(chat_id, note)
-            note_database.mark_reminder_notified(note["id"])
+            self._advance_or_close(note)
             self.reminderNotified.emit(note["id"])
+
+    def _advance_or_close(self, note):
+        """Vardiya bağımlı (bkz. shift_reminder_utils.py) bir hatırlatmayı bir
+        sonraki uygun güne taşır; diğer (tek seferlik) hatırlatmaları olduğu
+        gibi 'bildirildi' işaretler."""
+        repeat = note.get("repeat_frequency")
+        if shift_reminder_utils.is_shift_repeat(repeat):
+            shift_code = shift_reminder_utils.shift_code_from_repeat(repeat)
+            fired_at = datetime.fromisoformat(note["remind_at"])
+            time_str = fired_at.strftime("%H:%M")
+            next_at = shift_reminder_utils.next_occurrence_iso(shift_code, time_str, fired_at.date())
+            if next_at:
+                note_database.reschedule_reminder(note["id"], next_at)
+                return
+            print(f"⚠️ Vardiya hatırlatması için sonraki tarih bulunamadı (not id={note['id']}), tek seferlik kapatılıyor.")
+        note_database.mark_reminder_notified(note["id"])
 
     def _sleep(self, seconds):
         for _ in range(seconds * 10):
